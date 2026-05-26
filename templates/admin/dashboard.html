@@ -1,0 +1,121 @@
+{% extends "admin/base.html" %}
+{% block title %}仪表盘{% endblock %}
+{% block page_title %}📊 系统仪表盘{% endblock %}
+{% block content %}
+
+<!-- 统计卡片 -->
+<div class="stat-cards">
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#e8f4fd;color:#1976d2">👥</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.total_users|default(0) }}</div>
+            <div class="stat-label">总用户数</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#e8f5e9;color:#388e3c">✅</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.active_users|default(0) }}</div>
+            <div class="stat-label">活跃用户</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#fff3e0;color:#f57c00">⭐</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.vip_count|default(0) }}</div>
+            <div class="stat-label">VIP用户</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#fce4ec;color:#c62828">📈</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.total_funds|default(0) }}</div>
+            <div class="stat-label">基金数量</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#f3e5f5;color:#7b1fa2">🆕</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.new_today|default(0) }}</div>
+            <div class="stat-label">今日新增</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon" style="background:#e0f7fa;color:#00796b">🔑</div>
+        <div class="stat-info">
+            <div class="stat-value">{{ stats.login_today|default(0) }}</div>
+            <div class="stat-label">今日登录</div>
+        </div>
+    </div>
+</div>
+
+<div class="admin-grid-2">
+    <!-- 最近操作日志 -->
+    <div class="admin-panel">
+        <div class="panel-header">
+            <h3>📋 最近操作</h3>
+            <a href="{{ url_for('admin_logs') }}" class="btn btn-sm btn-link">查看全部 →</a>
+        </div>
+        <div class="panel-body">
+            {% if recent_logs %}
+            <table class="data-table">
+                <thead><tr><th>时间</th><th>用户</th><th>操作</th><th>详情</th></tr></thead>
+                <tbody>
+                    {% for log in recent_logs[:10] %}
+                    <tr>
+                        <td class="text-muted text-sm">{{ log.created_at[5:16] if log.created_at else '-' }}</td>
+                        <td>{{ log.username or '-' }}</td>
+                        <td><span class="badge badge-{{ log.action }}">{{ log.action }}</span></td>
+                        <td class="text-muted text-sm truncate">{{ log.detail or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="text-center text-muted py-4">暂无操作记录</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 快捷操作 -->
+    <div class="admin-panel">
+        <div class="panel-header"><h3>🛠️ 快捷操作</h3></div>
+        <div class="panel-body">
+            <div class="quick-actions">
+                <a href="{{ url_for('admin_users') }}" class="action-btn">
+                    <span class="action-icon">👤</span>
+                    <span>管理用户</span>
+                    <small>查看/编辑/封禁</small>
+                </a>
+                <a href="{{ url_for('admin_config') }}" class="action-btn">
+                    <span class="action-icon">⚙️</span>
+                    <span>系统配置</span>
+                    <small>注册开关/预览条数等</small>
+                </a>
+                <a href="/api/refresh" class="action-btn" onclick="return confirm('确认刷新数据?')">
+                    <span class="action-icon">🔄</span>
+                    <span>刷新数据</span>
+                    <small>手动拉取最新数据</small>
+                </a>
+                <a href="{{ url_for('admin_logs') }}" class="action-btn">
+                    <span class="action-icon">📋</span>
+                    <span>操作审计</span>
+                    <small>查看所有操作记录</small>
+                </a>
+            </div>
+
+            <!-- 系统信息 -->
+            <div class="sys-info mt-4">
+                <h4>系统信息</h4>
+                <div class="info-row"><span>数据库版本</span><span>v5.0 (SQLite)</span></div>
+                <div class="info-row"><span>最后数据更新</span><span>{{ stats.last_data_time or '未知' }}</span></div>
+                <div class="info-row"><span>管理员数量</span><span>{{ stats.admin_count|default(1) }}</span></div>
+                <div class="info-row"><span>自选总数</span><span>{{ stats.total_favorites|default(0) }}</span></div>
+                <div class="info-row"><span>近7天日志</span><span>{{ stats.recent_logs|default(0) }} 条</span></div>
+                <div class="info-row"><span>已删用户</span><span>{{ stats.deleted_users|default(0) }} 人</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

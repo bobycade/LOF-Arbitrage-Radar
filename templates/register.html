@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注册 - LOF套利雷达</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="auth-page">
+    <div class="auth-container">
+        <!-- 左侧品牌区 -->
+        <div class="auth-brand">
+            <div class="brand-content">
+                <h1>LOF套利雷达</h1>
+                <p class="brand-subtitle">实时监控LOF基金溢价/折价机会<br>让数据驱动你的投资决策</p>
+                <div class="brand-features">
+                    <div class="feature-item">📊 实时数据更新</div>
+                    <div class="feature-item">🎯 溢价/折价套利筛选</div>
+                    <div class="feature-item">🔔 智能预警推送</div>
+                    <div class="feature-item">💰 收益计算器</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧注册表单 -->
+        <div class="auth-form-wrapper">
+            <form id="registerForm" class="auth-form" onsubmit="return handleRegister(event)">
+                <div class="auth-header">
+                    <h2>创建账户</h2>
+                    <p>免费注册，立即开始使用</p>
+                </div>
+
+                {% if error %}
+                <div class="auth-error">{{ error }}</div>
+                {% endif %}
+
+                <div class="form-group">
+                    <label for="regUsername">
+                        <span class="label-icon">👤</span>
+                        用户名
+                        <span class="field-hint">4-20位，字母数字下划线</span>
+                    </label>
+                    <input type="text" id="regUsername" name="username"
+                           placeholder="设置一个用户名"
+                           required minlength="4" maxlength="20"
+                           pattern="[a-zA-Z0-9_]+"
+                           autocomplete="username"
+                           autofocus>
+                </div>
+
+                <div class="form-group">
+                    <label for="regEmail">
+                        <span class="label-icon">📧</span>
+                        邮箱
+                    </label>
+                    <input type="email" id="regEmail" name="email"
+                           placeholder="用于接收重要通知（可选）"
+                           autocomplete="email">
+                </div>
+
+                <div class="form-group">
+                    <label for="regNickname">
+                        <span class="label-icon">😊</span>
+                        昵称
+                        <span class="field-hint">显示名称，可留空</span>
+                    </label>
+                    <input type="text" id="regNickname" name="nickname"
+                           placeholder="你的昵称（可选）"
+                           maxlength="20">
+                </div>
+
+                <div class="form-group">
+                    <label for="regPassword">
+                        <span class="label-icon">🔒</span>
+                        密码
+                        <span class="field-hint">至少6位，建议混合大小写+数字</span>
+                    </label>
+                    <div class="password-input-wrapper">
+                        <input type="password" id="regPassword" name="password"
+                               placeholder="设置登录密码"
+                               required minlength="6"
+                               autocomplete="new-password">
+                        <button type="button" class="toggle-pwd" onclick="togglePassword('regPassword', this)">👁️</button>
+                    </div>
+                    <!-- 密码强度指示器 -->
+                    <div class="pwd-strength" id="pwdStrength">
+                        <div class="strength-bar"></div>
+                        <span class="strength-text"></span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="regConfirmPwd">
+                        <span class="label-icon">🔐</span>
+                        确认密码
+                    </label>
+                    <input type="password" id="regConfirmPwd" name="confirm_password"
+                           placeholder="再次输入密码"
+                           required minlength="6"
+                           autocomplete="new-password">
+                </div>
+
+                <div class="form-options">
+                    <label class="agree-terms">
+                        <input type="checkbox" id="agreeTerms" checked>
+                        <span>我已阅读并同意<a href="javascript:void(0)" onclick="showTerms()">服务条款</a></span>
+                    </label>
+                </div>
+
+                <button type="submit" class="auth-submit-btn register-btn" id="registerBtn">
+                    注 册
+                </button>
+
+                <div class="auth-footer">
+                    <p>已有账号？<a href="{{ url_for('login') }}">返回登录</a></p>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        // 密码可见性切换
+        function togglePassword(inputId, btn) {
+            const input = document.getElementById(inputId);
+            if (input.type === 'password') {
+                input.type = 'text';
+                btn.textContent = '🙈';
+            } else {
+                input.type = 'password';
+                btn.textContent = '👁️';
+            }
+        }
+
+        // 密码强度检测
+        const pwdInput = document.getElementById('regPassword');
+        if (pwdInput) {
+            pwdInput.addEventListener('input', function() {
+                checkPasswordStrength(this.value);
+            });
+        }
+
+        function checkPasswordStrength(pwd) {
+            const container = document.getElementById('pwdStrength');
+            const bar = container.querySelector('.strength-bar');
+            const text = container.querySelector('.strength-text');
+
+            let strength = 0;
+            let label = '';
+            let color = '';
+
+            if (pwd.length >= 6) strength++;
+            if (pwd.length >= 10) strength++;
+            if (/[a-z]/.test(pwd) && /[A-Z]/.test(pwd)) strength++;
+            if (/\d/.test(pwd)) strength++;
+            if (/[^a-zA-Z\d]/.test(pwd)) strength++;
+
+            if (strength <= 2) { label = '弱'; color = '#f44336'; }
+            else if (strength === 3 || strength === 4) { label = '中等'; color = '#ff9800'; }
+            else { label = '强'; color = '#4caf50'; }
+
+            bar.style.width = Math.min(strength * 20, 100) + '%';
+            bar.style.backgroundColor = color;
+            text.textContent = pwd.length > 0 ? `密码强度：${label}` : '';
+            container.style.display = pwd.length > 0 ? 'flex' : 'none';
+        }
+
+        // 注册提交
+        async function handleRegister(e) {
+            e.preventDefault();
+
+            const username = document.getElementById('regUsername').value.trim();
+            const email = document.getElementById('regEmail').value.trim();
+            const nickname = document.getElementById('regNickname').value.trim();
+            const password = document.getElementById('regPassword').value;
+            const confirmPwd = document.getElementById('regConfirmPwd').value;
+
+            // 前端校验
+            if (!username || !password) {
+                showRegError('请填写用户名和密码');
+                return false;
+            }
+            if (!/^[a-zA-Z0-9_]{4,20}$/.test(username)) {
+                showRegError('用户名需4-20位，仅支持字母、数字和下划线');
+                return false;
+            }
+            if (password.length < 6) {
+                showRegError('密码至少需要6个字符');
+                return false;
+            }
+            if (password !== confirmPwd) {
+                showRegError('两次输入的密码不一致');
+                return false;
+            }
+            if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                showRegError('请输入有效的邮箱地址');
+                return false;
+            }
+            if (!document.getElementById('agreeTerms').checked) {
+                showRegError('请先同意服务条款');
+                return false;
+            }
+
+            const btn = document.getElementById('registerBtn');
+            btn.disabled = true;
+            btn.textContent = '注册中...';
+            hideRegError();
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: username,
+                        email: email || `${username}@lof.local`,  // 无邮箱时用默认邮箱
+                        password: password,
+                        nickname: nickname || null
+                    })
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    showRegSuccess('🎉 注册成功！正在跳转到登录页...');
+                    setTimeout(() => {
+                        window.location.href = '/login?username=' + encodeURIComponent(username);
+                    }, 1500);
+                } else {
+                    showRegError(data.error || '注册失败，请重试');
+                    btn.disabled = false;
+                    btn.textContent = '注 册';
+                }
+            } catch (err) {
+                showRegError('网络错误，请检查连接后重试');
+                btn.disabled = false;
+                btn.textContent = '注 册';
+            }
+
+            return false;
+        }
+
+        function showRegError(msg) {
+            let el = document.querySelector('#registerForm .auth-error.dynamic');
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'auth-error dynamic';
+                document.getElementById('registerForm').insertBefore(
+                    el, document.querySelector('#registerForm .form-group')
+                );
+            }
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+
+        function hideRegError() {
+            const el = document.querySelector('#registerForm .auth-error.dynamic');
+            if (el) el.style.display = 'none';
+        }
+
+        function showRegSuccess(msg) {
+            let el = document.querySelector('#registerForm .auth-success-msg');
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'auth-success-msg';
+                document.getElementById('registerForm').insertBefore(
+                    el, document.querySelector('#registerForm button[type=submit]')
+                );
+            }
+            el.innerHTML = msg;
+            el.style.display = 'block';
+        }
+
+        function showTerms() {
+            alert('LOF套利雷达 服务条款\n\n1. 本平台提供的所有数据仅供参考，不构成任何投资建议。\n2. 用户应对自己的投资决策负责。\n3. 禁止利用本平台数据进行商业用途。\n4. 平台保留随时修改服务的权利。');
+        }
+
+        // Enter 快捷键
+        document.addEventListener('DOMContentLoaded', function() {
+            ['regUsername','regEmail','regNickname','regPassword','regConfirmPwd'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (id === 'regConfirmPwd') handleRegister(e);
+                        else {
+                            const inputs = ['regUsername','regEmail','regNickname','regPassword','regConfirmPwd'];
+                            const idx = inputs.indexOf(id);
+                            if (idx < inputs.length - 1) document.getElementById(inputs[idx + 1]).focus();
+                        }
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>

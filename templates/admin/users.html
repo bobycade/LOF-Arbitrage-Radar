@@ -1,0 +1,175 @@
+{% extends "admin/base.html" %}
+{% block title %}用户管理{% endblock %}
+{% block page_title %}👥 用户管理{% endblock %}
+{% block content %}
+
+<!-- 搜索栏 -->
+<div class="admin-panel mb-4">
+    <div class="panel-body">
+        <form method="GET" class="search-form">
+            <input type="text" name="keyword" value="{{ keyword }}" placeholder="搜索用户名/邮箱/昵称..." class="search-input">
+            <button type="submit" class="btn btn-primary">搜索</button>
+            {% if keyword %}
+            <a href="{{ url_for('admin_users') }}" class="btn btn-outline">清除</a>
+            {% endif %}
+        </form>
+    </div>
+</div>
+
+<!-- 用户列表 -->
+<div class="admin-panel">
+    <div class="panel-header">
+        <h3>用户列表
+            {% if keyword %}<span class="text-muted text-sm">(搜索: {{ keyword }})</span>{% endif %}
+        </h3>
+        <span class="text-muted">共 {{ users.total }} 人 · 第 {{ users.page }} 页</span>
+    </div>
+    <div class="panel-body p-0">
+        <table class="data-table admin-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>用户名</th>
+                    <th>邮箱</th>
+                    <th>昵称</th>
+                    <th>角色</th>
+                    <th>状态</th>
+                    <th>登录次数</th>
+                    <th>注册时间</th>
+                    <th>最后登录</th>
+                    <th width="160">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users.data %}
+                <tr id="user-{{ u.id }}">
+                    <td>{{ u.id }}</td>
+                    <td><strong>{{ u.username }}</strong></td>
+                    <td class="text-muted">{{ u.email }}</td>
+                    <td>{{ u.nickname or '-' }}</td>
+                    <td>
+                        <select class="role-select" data-user-id="{{ u.id }}" onchange="changeRole({{ u.id }}, this.value)">
+                            <option value="free" {% if u.role=='free' %}selected{% endif %}>免费</option>
+                            <option value="vip" {% if u.role=='vip' %}selected{% endif %}>VIP</option>
+                            <option value="admin" {% if u.role=='admin' %}selected{% endif %}>管理员</option>
+                        </select>
+                    </td>
+                    <td>
+                        {% if not u.is_active and u.banned_until %}
+                            <span class="badge badge-danger">已封禁</span><br>
+                            <small class="text-danger">{{ u.banned_until[:10] }}</small>
+                        {% elif not u.is_active %}
+                            <span class="badge badge-secondary">禁用</span>
+                        {% elif u.deleted_at %}
+                            <span class="badge badge-warning">已删除</span>
+                        {% else %}
+                            <span class="badge badge-success">正常</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ u.login_count or 0 }}</td>
+                    <td class="text-sm">{{ (u.created_at or '')[:10] }}</td>
+                    <td class="text-sm">{{ (u.last_login or '-')[:10] }}</td>
+                    <td>
+                        <div class="action-group">
+                            <a href="{{ url_for('admin_user_detail', user_id=u.id) }}" class="btn btn-sm btn-link">编辑</a>
+                            {% if u.is_active %}
+                            <button class="btn btn-sm btn-danger" onclick="banUser({{ u.id }}, '{{ u.username }}')">封禁</button>
+                            {% else %}
+                            <button class="btn btn-sm btn-success" onclick="unbanUser({{ u.id }}, '{{ u.username }}')">解封</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" class="text-center text-muted py-8">暂无用户数据</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- 分页 -->
+    {% if users.total > users.per_page %}
+    <div class="panel-footer">
+        <div class="pagination">
+            {% if users.page > 1 %}
+            <a href="?page={{ users.page - 1 }}&keyword={{ keyword }}" class="page-btn">上一页</a>
+            {% endif %}
+            <span class="page-info">第 {{ users.page }} / {{ -(-users.total // users.per_page) }} 页</span>
+            {% if users.page * users.per_page < users.total %}
+            <a href="?page={{ users.page + 1 }}&keyword={{ keyword }}" class="page-btn">下一页</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 封禁弹窗 -->
+<div id="banModal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+        <h3>🔒 封禁用户: <span id="banUsername"></span></h3>
+        <p>请选择封禁天数：</p>
+        <select id="banDays" class="form-control">
+            <option value="7">7天</option>
+            <option value="30" selected>30天</option>
+            <option value="90">90天</option>
+            <option value="365">永久(365天)</option>
+        </select>
+        <div class="modal-actions mt-4">
+            <button class="btn btn-danger" onclick="confirmBan()">确认封禁</button>
+            <button class="btn btn-outline" onclick="closeBanModal()">取消</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let banUserId = null;
+function banUser(id, username) {
+    banUserId = id;
+    document.getElementById('banUsername').textContent = username;
+    document.getElementById('banModal').style.display = 'flex';
+}
+function closeBanModal() {
+    document.getElementById('banModal').style.display = 'none';
+    banUserId = null;
+}
+function confirmBan() {
+    const days = document.getElementById('banDays').value;
+    fetch(`/api/admin/user/${banUserId}/ban`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ban: true, days: parseInt(days)})
+    })
+    .then(r => r.json())
+    .then(res => {
+        showToast(res.message || (res.success ? '操作成功' : res.error), res.success ? 'success' : 'error');
+        if (res.success) { setTimeout(() => location.reload(), 800); }
+    });
+    closeBanModal();
+}
+function unbanUser(id, username) {
+    if (!confirm(`确认解除对 ${username} 的封禁?`)) return;
+    fetch(`/api/admin/user/${id}/ban`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ban: false})
+    })
+    .then(r => r.json())
+    .then(res => {
+        showToast(res.message || (res.success ? '操作成功' : res.error), res.success ? 'success' : 'error');
+        if (res.success) { setTimeout(() => location.reload(), 800); }
+    });
+}
+function changeRole(userId, newRole) {
+    fetch(`/api/admin/user/${userId}/role`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({role: newRole})
+    })
+    .then(r => r.json())
+    .then(res => {
+        showToast(res.message || (res.success ? '角色已更改' : res.error), res.success ? 'success' : 'error');
+        if (!res.success) { location.reload(); }  // 失败则回滚
+    });
+}
+</script>
+{% endblock %}

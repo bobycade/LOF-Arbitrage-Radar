@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}管理后台{% endblock %} - LOF套利雷达</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}">
+</head>
+<body class="admin-body">
+    <!-- 侧边栏 -->
+    <aside class="admin-sidebar" id="adminSidebar">
+        <div class="admin-logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">LOF套利雷达</span>
+            <span class="logo-badge">v5.0</span>
+        </div>
+        <nav class="admin-nav">
+            <a href="{{ url_for('admin_dashboard') }}" class="nav-item {% if request.endpoint == 'admin_dashboard' %}active{% endif %}">
+                <span class="nav-icon">📊</span>
+                <span>仪表盘</span>
+            </a>
+            <a href="{{ url_for('admin_users') }}" class="nav-item {% if request.endpoint in ('admin_users','admin_user_detail') %}active{% endif %}">
+                <span class="nav-icon">👥</span>
+                <span>用户管理</span>
+            </a>
+            <a href="{{ url_for('admin_config') }}" class="nav-item {% if request.endpoint == 'admin_config' %}active{% endif %}">
+                <span class="nav-icon">⚙️</span>
+                <span>系统配置</span>
+            </a>
+            <a href="{{ url_for('admin_logs') }}" class="nav-item {% if request.endpoint == 'admin_logs' %}active{% endif %}">
+                <span class="nav-icon">📋</span>
+                <span>操作日志</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="{{ url_for('index') }}" class="back-link">← 返回前台</a>
+        </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="admin-main" id="adminMain">
+        <!-- 顶栏 -->
+        <header class="admin-header">
+            <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+            <h1 class="page-title">{% block page_title %}管理后台{% endblock %}</h1>
+            <div class="header-right">
+                {% if user %}
+                <span class="admin-badge">{{ user.nickname or user.username }}</span>
+                <a href="{{ url_for('api_logout') }}" class="btn btn-sm btn-outline" onclick="event.preventDefault();fetch('/api/logout').then(()=>location='/login')">退出登录</a>
+                {% endif %}
+            </div>
+        </header>
+
+        <!-- 页面内容 -->
+        <div class="admin-content">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Toast 通知 -->
+    <div id="toast" class="admin-toast"></div>
+
+    <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

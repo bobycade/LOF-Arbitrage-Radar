@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - LOF套利雷达</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="auth-page">
+    <div class="auth-container">
+        <!-- 左侧品牌区 -->
+        <div class="auth-brand">
+            <div class="brand-content">
+                <h1>LOF套利雷达</h1>
+                <p class="brand-subtitle">实时监控LOF基金溢价/折价机会<br>让数据驱动你的投资决策</p>
+                <div class="brand-features">
+                    <div class="feature-item">📊 实时数据更新</div>
+                    <div class="feature-item">🎯 溢价/折价套利筛选</div>
+                    <div class="feature-item">🔔 智能预警推送</div>
+                    <div class="feature-item">💰 收益计算器</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧登录表单 -->
+        <div class="auth-form-wrapper">
+            <form id="loginForm" class="auth-form" onsubmit="return handleLogin(event)">
+                <div class="auth-header">
+                    <h2>欢迎回来</h2>
+                    <p>请登录您的账户</p>
+                </div>
+
+                {% if error %}
+                <div class="auth-error">{{ error }}</div>
+                {% endif %}
+
+                {% if next_url %}
+                <input type="hidden" id="nextUrl" value="{{ next_url }}">
+                {% endif %}
+
+                <div class="form-group">
+                    <label for="loginName">
+                        <span class="label-icon">👤</span>
+                        用户名 / 邮箱
+                    </label>
+                    <input type="text" id="loginName" name="login_name"
+                           placeholder="输入用户名或邮箱"
+                           value="{{ default_username or '' }}"
+                           required autocomplete="username"
+                           autofocus>
+                </div>
+
+                <div class="form-group">
+                    <label for="loginPassword">
+                        <span class="label-icon">🔒</span>
+                        密码
+                    </label>
+                    <div class="password-input-wrapper">
+                        <input type="password" id="loginPassword" name="password"
+                               placeholder="输入密码"
+                               required autocomplete="current-password">
+                        <button type="button" class="toggle-pwd" onclick="togglePassword('loginPassword', this)">👁️</button>
+                    </div>
+                </div>
+
+                <div class="form-options">
+                    <label class="remember-me">
+                        <input type="checkbox" id="rememberMe" checked>
+                        <span>记住我（7天免登录）</span>
+                    </label>
+                    <!-- 后续可加：忘记密码链接 -->
+                </div>
+
+                <button type="submit" class="auth-submit-btn" id="loginBtn">
+                    登 录
+                </button>
+
+                <div class="auth-footer">
+                    <p>还没有账号？<a href="{{ url_for('register') }}">立即注册</a></p>
+                </div>
+
+                <div class="demo-hint" id="demoHint" style="display: none;">
+                    <p>💡 提示：首次使用请先<a href="{{ url_for('register') }}">注册账号</a></p>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        // 切换密码可见性
+        function togglePassword(inputId, btn) {
+            const input = document.getElementById(inputId);
+            if (input.type === 'password') {
+                input.type = 'text';
+                btn.textContent = '🙈';
+            } else {
+                input.type = 'password';
+                btn.textContent = '👁️';
+            }
+        }
+
+        // 处理登录提交
+        async function handleLogin(e) {
+            e.preventDefault();
+
+            const btn = document.getElementById('loginBtn');
+            const loginName = document.getElementById('loginName').value.trim();
+            const password = document.getElementById('loginPassword').value;
+
+            if (!loginName || !password) {
+                showFormError('请填写完整的登录信息');
+                return false;
+            }
+
+            // UI 状态
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            hideFormError();
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        login_name: loginName,
+                        password: password,
+                        remember: document.getElementById('rememberMe').checked
+                    })
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    // 登录成功，跳转
+                    const nextUrl = document.getElementById('nextUrl');
+                    const target = (nextUrl && nextUrl.value) ? nextUrl.value : '/';
+                    window.location.href = target;
+                } else {
+                    showFormError(data.error || '登录失败，请重试');
+                    btn.disabled = false;
+                    btn.textContent = '登 录';
+                }
+            } catch (err) {
+                showFormError('网络错误，请检查连接后重试');
+                btn.disabled = false;
+                btn.textContent = '登 录';
+            }
+
+            return false;
+        }
+
+        function showFormError(msg) {
+            let el = document.querySelector('.auth-error.dynamic');
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'auth-error dynamic';
+                document.getElementById('loginForm').insertBefore(
+                    el, document.getElementById('loginForm').querySelector('.form-group')
+                );
+            }
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+
+        function hideFormError() {
+            const el = document.querySelector('.auth-error.dynamic');
+            if (el) el.style.display = 'none';
+        }
+
+        // Enter 键快捷提交
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('loginPassword').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') handleLogin(e);
+            });
+        });
+    </script>
+</body>
+</html>

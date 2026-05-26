@@ -1,0 +1,86 @@
+{% extends "admin/base.html" %}
+{% block title %}操作日志{% endblock %}
+{% block page_title %}📋 操作日志{% endblock %}
+{% block content %}
+
+<!-- 筛选栏 -->
+<div class="admin-panel mb-4">
+    <div class="panel-body">
+        <div class="filter-bar">
+            <label>操作类型:</label>
+            <select id="actionFilter" onchange="filterLogs()">
+                <option value="">全部</option>
+                <option value="login" {% if action_filter=='login' %}selected{% endif %}>登录</option>
+                <option value="register" {% if action_filter=='register' %}selected{% endif %}>注册</option>
+                <option value="update_user" {% if action_filter=='update_user' %}selected{% endif %}>更新用户</option>
+                <option value="change_role" {% if action_filter=='change_role' %}selected{% endif %}>改角色</option>
+                <option value="ban_user" {% if action_filter=='ban_user' %}selected{% endif %}>封禁</option>
+                <option value="unban_user" {% if action_filter=='unban_user' %}selected{% endif %}>解封</option>
+                <option value="reset_password" {% if action_filter=='reset_password' %}selected{% endif %}>重置密码</option>
+                <option value="delete_user" {% if action_filter=='delete_user' %}selected{% endif %}>删除用户</option>
+                <option value="restore_user" {% if action_filter=='restore_user' %}selected{% endif %}>恢复用户</option>
+                <option value="update_config" {% if action_filter=='update_config' %}selected{% endif %}>修改配置</option>
+            </select>
+
+            <label class="ml-4">数量:</label>
+            <select id="limitSelect" onchange="loadLogs()">
+                <option value="50">50条</option>
+                <option value="100" selected>100条</option>
+                <option value="200">200条</option>
+                <option value="500">500条</option>
+            </select>
+
+            <button class="btn btn-outline btn-sm ml-2" onclick="loadLogs()">🔄 刷新</button>
+        </div>
+    </div>
+</div>
+
+<!-- 日志列表 -->
+<div class="admin-panel">
+    <div class="panel-body p-0">
+        <table class="data-table admin-table">
+            <thead>
+                <tr>
+                    <th width="40">#</th>
+                    <th width="160">时间</th>
+                    <th width="100">操作人</th>
+                    <th width="120">操作类型</th>
+                    <th width="80">目标类型</th>
+                    <th width="60">目标ID</th>
+                    <th>详情</th>
+                    <th width="150">IP地址</th>
+                </tr>
+            </thead>
+            <tbody id="logsBody">
+                {% for log in logs %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td class="text-sm">{{ log.created_at or '-' }}</td>
+                    <td>{{ log.username or log.operator_name or '-' }}</td>
+                    <td><span class="badge badge-{{ log.action }}">{{ log.action }}</span></td>
+                    <td>{{ log.target_type or '-' }}</td>
+                    <td>{{ log.target_id or '-' }}</td>
+                    <td class="text-sm text-muted">{{ (log.detail or '-')[:100] }}</td>
+                    <td class="text-sm text-muted">{{ log.ip_address or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8" class="text-center text-muted py-8">暂无日志记录</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+function loadLogs() {
+    const action = document.getElementById('actionFilter').value;
+    const limit = document.getElementById('limitSelect').value;
+    let url = `/admin/logs?limit=${limit}`;
+    if (action) url += `&action=${action}`;
+    location.href = url;
+}
+function filterLogs() {
+    loadLogs();
+}
+</script>
+{% endblock %}

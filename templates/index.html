@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LOF套利监控平台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=5.12">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>LOF套利监控平台</h1>
+            <div class="status-bar">
+                <div class="last-update">
+                    最后更新：<span id="lastUpdate">从未</span>
+                </div>
+                <div class="refresh-countdown">
+                    下次刷新：<span id="nextRefresh">计算中...</span>
+                </div>
+                <div class="refresh-status" id="refreshStatus">-</div>
+                <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">手动刷新</button>
+                <button class="settings-btn" id="settingsBtn" onclick="toggleSettings()">⚙️ 预警设置</button>
+                <!-- 用户信息区（动态填充） -->
+                <div class="user-area" id="userArea">
+                    {% if user %}
+                    <span class="user-avatar">{{ (user.nickname or user.username)[0]|upper }}</span>
+                    <span class="user-name">{{ user.nickname or user.username }}</span>
+                    {% if user.role == 'vip' %}<span class="vip-badge">VIP</span>{% endif %}
+                    {% if user.role == 'admin' %}
+                    <a href="/admin" class="admin-link" title="管理后台">🛠️ 管理后台</a>
+                    {% endif %}
+                    <button class="logout-btn" onclick="handleLogout()">退出</button>
+                    {% else %}
+                    <button class="login-btn" onclick="showLogin()">登录</button>
+                    <button class="register-btn-sm" onclick="showRegister()">注册</button>
+                    {% endif %}
+                </div>
+                <button class="theme-toggle" id="themeBtn" onclick="toggleTheme()">🌙</button>
+            </div>
+        </div>
+
+        <!-- 未登录提示条 -->
+        <div class="guest-banner" id="guestBanner" style="{% if user %}display:none{% endif %}">
+            📌 你正在以游客身份浏览，部分功能受限。
+            <a href="/login">登录</a> 后可查看完整数据、使用自选和导出等功能
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('premium')">溢价套利</button>
+            <button class="tab-btn" onclick="switchTab('discount')">折价套利</button>
+            <button class="tab-btn" onclick="switchTab('qdii')">QDII专区</button>
+            <button class="tab-btn" onclick="switchTab('search')">搜索</button>
+            <button class="tab-btn" onclick="switchTab('favorites')" id="favTab" style="display: none;">⭐ 我的自选</button>
+        </div>
+
+        <div id="premium" class="tab-content active">
+            <div class="controls">
+                <select id="premiumTypeFilter" class="type-filter-select" onchange="loadData('premium')">
+                    <option value="">全部分类</option>
+                </select>
+                <input type="text" id="premiumSearch" class="search-box" placeholder="搜索基金代码或名称...">
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="premiumFilter" onchange="applyFilter('premium')">
+                    只看可操作（申购和赎回均开放）
+                </label>
+                <button class="export-btn" onclick="exportCSV('premium')">📊 导出CSV</button>
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable('premium', 'code')" data-sort="code">基金代码</th>
+                            <th onclick="sortTable('premium', 'name')" data-sort="name">基金名称</th>
+                            <th onclick="sortTable('premium', 'type')" data-sort="type">类型</th>
+                            <th onclick="sortTable('premium', 'nav_date')" data-sort="nav_date">净值日期 <span class="help-icon">?<span class="help-tooltip">基金净值计算的截止日期。净值日期越新，数据参考价值越高。若为T日净值，T+1日可申购/赎回。</span></span></th>
+                            <th onclick="sortTable('premium', 'market_price')" data-sort="market_price">场内价格 <span class="help-icon">?<span class="help-tooltip">基金在证券交易所（如深交所）的实时交易价格，随市场波动实时变化。</span></span></th>
+                            <th onclick="sortTable('premium', 'nav')" data-sort="nav">参考净值 <span class="help-icon">?<span class="help-tooltip">基金单位净值（NAV），即每份基金的实际资产价值。场外申购/赎回按此价格计算。</span></span></th>
+                            <th onclick="sortTable('premium', 'premium_rate')" data-sort="premium_rate">溢价率 <span class="help-icon">?<span class="help-tooltip">溢价率 = (场内价格 - 参考净值) / 参考净值 × 100%。正值表示场内价格高于净值，溢价套利即在场内卖出同时场外申购。</span></span></th>
+                            <th onclick="sortTable('premium', 'discount_rate')" data-sort="discount_rate">折价率 <span class="help-icon">?<span class="help-tooltip">折价率 = (参考净值 - 场内价格) / 参考净值 × 100%。正值表示场内价格低于净值，可考虑买入后赎回套利。</span></span></th>
+                            <th onclick="sortTable('premium', 'profit_after_fee')" data-sort="profit_after_fee">扣费后收益 <span class="help-icon">?<span class="help-tooltip">扣除申购费后的预期收益。溢价为正取溢价收益，折价为正取折价收益。</span></span></th>
+                            <th onclick="sortTable('premium', 'purchase_status')" data-sort="purchase_status">申购状态</th>
+                            <th onclick="sortTable('premium', 'redeem_status')" data-sort="redeem_status">赎回状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="premiumTableBody">
+                        <tr><td colspan="11">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="discount" class="tab-content">
+            <div class="controls">
+                <input type="text" id="discountSearch" class="search-box" placeholder="搜索基金代码或名称...">
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="discountFilter" onchange="applyFilter('discount')">
+                    只看可操作（申购和赎回均开放）
+                </label>
+                <button class="export-btn" onclick="exportCSV('discount')">📊 导出CSV</button>
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable('discount', 'code')" data-sort="code">基金代码</th>
+                            <th onclick="sortTable('discount', 'name')" data-sort="name">基金名称</th>
+                            <th onclick="sortTable('discount', 'type')" data-sort="type">类型</th>
+                            <th onclick="sortTable('discount', 'nav_date')" data-sort="nav_date">净值日期 <span class="help-icon">?<span class="help-tooltip">基金净值计算的截止日期。净值日期越新，数据参考价值越高。</span></span></th>
+                            <th onclick="sortTable('discount', 'market_price')" data-sort="market_price">场内价格 <span class="help-icon">?<span class="help-tooltip">基金在证券交易所的实时交易价格，折价套利即在场内低价买入后场外赎回。</span></span></th>
+                            <th onclick="sortTable('discount', 'nav')" data-sort="nav">参考净值 <span class="help-icon">?<span class="help-tooltip">赎回时按此价格结算。注意：T日买入后，赎回价格按T+2日净值计算，存在波动风险。</span></span></th>
+                            <th onclick="sortTable('discount', 'discount_rate')" data-sort="discount_rate">折价率 <span class="help-icon">?<span class="help-tooltip">折价率 = (参考净值 - 场内价格) / 参考净值 × 100%。正值表示场内价格低于净值，可考虑买入后赎回套利。</span></span></th>
+                            <th onclick="sortTable('discount', 'profit_after_fee')" data-sort="profit_after_fee">扣费后收益 <span class="help-icon">?<span class="help-tooltip">扣除交易费用后的预期收益。折价套利费用包括：买入佣金（约0.03%）+ 赎回费（持有<7天1.5%）。</span></span></th>
+                            <th onclick="sortTable('discount', 'purchase_status')" data-sort="purchase_status">申购状态</th>
+                            <th onclick="sortTable('discount', 'redeem_status')" data-sort="redeem_status">赎回状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="discountTableBody">
+                        <tr><td colspan="10">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="qdii" class="tab-content">
+            <div class="controls">
+                <select id="qdiiTypeFilter" class="type-filter-select" onchange="loadData('qdii')">
+                    <option value="">全部分类</option>
+                </select>
+                <input type="text" id="qdiiSearch" class="search-box" placeholder="搜索基金代码或名称...">
+                <button class="export-btn" onclick="exportCSV('qdii')">📊 导出CSV</button>
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable('qdii', 'code')" data-sort="code">基金代码</th>
+                            <th onclick="sortTable('qdii', 'name')" data-sort="name">基金名称</th>
+                            <th onclick="sortTable('qdii', 'type')" data-sort="type">类型</th>
+                            <th onclick="sortTable('qdii', 'nav_date')" data-sort="nav_date">净值日期 <span class="help-icon">?<span class="help-tooltip">QDII基金净值日期可能滞后海外市场1-2个交易日，请注意时差影响。</span></span></th>
+                            <th onclick="sortTable('qdii', 'market_price')" data-sort="market_price">场内价格</th>
+                            <th onclick="sortTable('qdii', 'nav')" data-sort="nav">参考净值 <span class="help-icon">?<span class="help-tooltip">QDII净值受汇率和海外市场双重影响，波动较大，需特别注意汇率风险。</span></span></th>
+                            <th onclick="sortTable('qdii', 'premium_rate')" data-sort="premium_rate">溢价率</th>
+                            <th onclick="sortTable('qdii', 'discount_rate')" data-sort="discount_rate">折价率</th>
+                            <th onclick="sortTable('qdii', 'profit_after_fee')" data-sort="profit_after_fee">扣费后收益</th>
+                            <th onclick="sortTable('qdii', 'purchase_status')" data-sort="purchase_status">申购状态</th>
+                            <th onclick="sortTable('qdii', 'redeem_status')" data-sort="redeem_status">赎回状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="qdiiTableBody">
+                        <tr><td colspan="11">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="search" class="tab-content">
+            <div class="controls">
+                <input type="text" id="searchInput" class="search-box" placeholder="输入基金代码或名称...">
+                <button class="search-btn" onclick="searchFund()">搜索</button>
+            </div>
+            <div class="search-results" id="searchResults">
+                <p>请输入基金代码或名称进行搜索</p>
+            </div>
+        </div>
+
+        <div id="favorites" class="tab-content">
+            <div class="controls">
+                <p>已关注的基金列表，点击基金代码可取消关注（<span id="favCount">0</span>只）</p>
+                <button class="export-btn" onclick="exportCSV('favorites')">📊 导出CSV</button>
+
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>基金代码</th>
+                            <th>基金名称</th>
+                            <th>类型</th>
+                            <th>净值日期</th>
+                            <th>场内价格</th>
+                            <th>参考净值</th>
+                            <th>溢价率</th>
+                            <th>扣费后收益</th>
+                            <th>申购状态</th>
+                            <th>赎回状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="favoritesTableBody">
+                        <tr><td colspan="10">暂无关注的基金</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 弹窗放到container外面，避免被父元素影响 -->
+    <!-- 预警设置弹窗 -->
+    <div class="settings-panel" id="settingsPanel" style="display: none;">
+        <div class="settings-header">
+            <h3>📢 浏览器预警设置</h3>
+            <button class="close-btn" onclick="toggleSettings()">×</button>
+        </div>
+        <div class="settings-content">
+            <div class="setting-item">
+                <label>
+                    <input type="checkbox" id="enableNotif" onchange="toggleNotification()">
+                    启用浏览器通知
+                </label>
+                <span class="hint">需要浏览器授权</span>
+            </div>
+            <div class="setting-item">
+                <label>溢价率预警阈值：</label>
+                <input type="number" id="premiumThreshold" value="3.0" step="0.1" min="0" max="20">
+                <span class="unit">%</span>
+            </div>
+            <div class="setting-item">
+                <label>折价率预警阈值：</label>
+                <input type="number" id="discountThreshold" value="2.0" step="0.1" min="0" max="20">
+                <span class="unit">%</span>
+            </div>
+            <div class="setting-item">
+                <label>最低扣费后收益：</label>
+                <input type="number" id="profitThreshold" value="1.5" step="0.1" min="0" max="10">
+                <span class="unit">%</span>
+            </div>
+            <div class="setting-item">
+                <label>冷却时间（防打扰）：</label>
+                <input type="number" id="cooldownTime" value="30" step="5" min="5" max="120">
+                <span class="unit">分钟</span>
+            </div>
+            <button class="save-btn" onclick="saveSettings()">保存设置</button>
+        </div>
+    </div>
+
+    <!-- 成本计算器弹窗 -->
+    <div class="calculator-modal" id="calculatorModal" style="display: none;">
+        <div class="calculator-content">
+            <div class="calculator-header">
+                <h3 id="calcTitle">💰 套利收益计算器</h3>
+                <button class="close-btn" onclick="closeCalculator()">×</button>
+            </div>
+            <div class="calc-fund-info" id="calcFundInfo" style="display: none;">
+                <span class="calc-fund-code" id="calcFundCode"></span>
+                <span class="calc-fund-name" id="calcFundName"></span>
+                <span class="calc-fund-type" id="calcFundType"></span>
+            </div>
+            <div class="calculator-body">
+                <div class="calc-inputs">
+                    <div class="calc-row">
+                        <label>投资金额（元）：</label>
+                        <input type="number" id="investAmount" value="10000" min="100" step="100">
+                    </div>
+                    <div class="calc-row">
+                        <label>场内价格（元）：</label>
+                        <input type="number" id="marketPrice" step="0.001" min="0" placeholder="从表格带入或手动输入">
+                    </div>
+                    <div class="calc-row">
+                        <label>参考净值（元）：</label>
+                        <input type="number" id="navValue" step="0.001" min="0" placeholder="基金单位净值(NAV)">
+                    </div>
+                    <div class="calc-row">
+                        <label>溢价率 / 折价率 (%)：</label>
+                        <input type="number" id="rateValue" step="0.01" min="-50" max="50">
+                    </div>
+                    <div class="calc-row">
+                        <label>扣费后收益率 (%)：</label>
+                        <input type="number" id="profitRate" step="0.01" min="-50" max="50">
+                    </div>
+                    <div class="calc-row calc-status-row" id="calcStatusRow" style="display: none;">
+                        <label>状态提示：</label>
+                        <span id="calcStatusHint" class="status-hint"></span>
+                    </div>
+                    <button class="calc-btn" onclick="calculateProfit()">📊 计算收益</button>
+                </div>
+                <div class="calc-results" id="calcResults" style="display: none;">
+                    <h4>📈 收益明细</h4>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <span class="result-label">操作方向</span>
+                            <span class="result-value result-direction" id="calcDirection">-</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">可获得份额</span>
+                            <span class="result-value" id="purchaseShares">-</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">预期收益</span>
+                            <span class="result-value" id="expectedProfit">-</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">收益率</span>
+                            <span class="result-value" id="yieldRate">-</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">费用合计</span>
+                            <span class="result-value fee-value" id="totalFees">-</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">资金占用</span>
+                            <span class="result-value" id="fundLockDays">-</span>
+                        </div>
+                    </div>
+                    <div class="calc-breakdown" id="calcBreakdown"></div>
+                    <div class="calc-suggestion" id="calcSuggestion"></div>
+                    <div class="result-warning" id="calcWarning"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 个人信息弹窗 -->
+    <div class="profile-modal" id="profileModal" style="display: none;">
+        <div class="profile-content">
+            <div class="profile-header">
+                <h3>👤 个人资料</h3>
+                <button class="close-btn" onclick="closeProfile()">×</button>
+            </div>
+            <!-- 查看模式 -->
+            <div class="profile-view" id="profileView">
+                <div class="profile-avatar-lg">
+                    <span id="profileAvatar">-</span>
+                </div>
+                <table class="profile-info-table">
+                    <tr><td>用户名</td><td id="profileUsername">-</td></tr>
+                    <tr><td>昵称</td><td id="profileNickname">-</td></tr>
+                    <tr><td>邮箱</td><td id="profileEmail">-</td></tr>
+                    <tr><td>角色</td><td id="profileRole">-</td></tr>
+                </table>
+                <button class="edit-profile-btn" onclick="showEditProfile()">✏️ 编辑资料</button>
+            </div>
+            <!-- 编辑模式 -->
+            <div class="profile-edit" id="profileEdit" style="display: none;">
+                <div class="form-group">
+                    <label>昵称</label>
+                    <input type="text" id="editNickname" placeholder="设置你的昵称">
+                </div>
+                <div class="form-group">
+                    <label>邮箱</label>
+                    <input type="email" id="editEmail" placeholder="用于接收通知">
+                </div>
+                <div class="form-actions">
+                    <button class="save-btn" onclick="saveProfile()">保存</button>
+                    <button class="cancel-btn" onclick="cancelEdit()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 基金详情侧边抽屉 ========== -->
+    <div class="fund-detail-overlay" id="fundDetailOverlay" onclick="closeFundDetail()"></div>
+    <div class="fund-detail-drawer" id="fundDetailDrawer">
+        <div class="fd-header">
+            <div class="fd-header-info">
+                <span class="fd-code" id="fdCode">-</span>
+                <h2 class="fd-name" id="fdName">加载中...</h2>
+            </div>
+            <div class="fd-header-actions">
+                <button class="fd-fav-btn" id="fdFavBtn" onclick="toggleFavFromDetail()">☆ 自选</button>
+                <button class="fd-close-btn" onclick="closeFundDetail()">✕</button>
+            </div>
+        </div>
+
+        <!-- 基本信息卡 -->
+        <div class="fd-section">
+            <div class="fd-section-title">📋 基本信息</div>
+            <div class="fd-info-grid" id="fdInfoGrid">
+                <div class="fd-info-item"><span class="fd-label">基金类型</span><span class="fd-value" id="fdType">-</span></div>
+                <div class="fd-info-item"><span class="fd-label">成立日期</span><span class="fd-value" id="fdSetupDate">-</span></div>
+                <div class="fd-info-item"><span class="fd-label">基金规模</span><span class="fd-value" id="fdScale">-</span></div>
+                <div class="fd-info-item"><span class="fd-label">基金公司</span><span class="fd-value" id="fdCompany">-</span></div>
+                <div class="fd-info-item"><span class="fd-label">基金经理</span><span class="fd-value" id="fdManager">-</span></div>
+                <div class="fd-info-item"><span class="fd-label">跟踪指数</span><span class="fd-value" id="fdIndex">-</span></div>
+            </div>
+        </div>
+
+        <!-- 实时行情卡 -->
+        <div class="fd-section">
+            <div class="fd-section-title">📊 实时行情</div>
+            <div class="fd-quote-grid">
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">场内价格</div>
+                    <div class="fd-quote-value" id="fdMarketPrice">-</div>
+                </div>
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">参考净值</div>
+                    <div class="fd-quote-value" id="fdNav">-</div>
+                </div>
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">溢/折价率</div>
+                    <div class="fd-quote-value" id="fdPremiumRate">-</div>
+                </div>
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">扣费后收益</div>
+                    <div class="fd-quote-value" id="fdProfit">-</div>
+                </div>
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">净值日期</div>
+                    <div class="fd-quote-value" id="fdNavDate">-</div>
+                </div>
+                <div class="fd-quote-item">
+                    <div class="fd-quote-label">申购/赎回</div>
+                    <div class="fd-quote-value" id="fdStatus">-</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 近期业绩 -->
+        <div class="fd-section">
+            <div class="fd-section-title">📈 近期业绩</div>
+            <div class="fd-perf-grid" id="fdPerfGrid">
+                <div class="fd-perf-item"><span class="fd-perf-label">近1周</span><span class="fd-perf-value" id="fdPerf1w">-</span></div>
+                <div class="fd-perf-item"><span class="fd-perf-label">近1月</span><span class="fd-perf-value" id="fdPerf1m">-</span></div>
+                <div class="fd-perf-item"><span class="fd-perf-label">近3月</span><span class="fd-perf-value" id="fdPerf3m">-</span></div>
+                <div class="fd-perf-item"><span class="fd-perf-label">近6月</span><span class="fd-perf-value" id="fdPerf6m">-</span></div>
+                <div class="fd-perf-item"><span class="fd-perf-label">近1年</span><span class="fd-perf-value" id="fdPerf1y">-</span></div>
+                <div class="fd-perf-item"><span class="fd-perf-label">成立以来</span><span class="fd-perf-value" id="fdPerfAll">-</span></div>
+            </div>
+        </div>
+
+        <!-- 净值走势图 -->
+        <div class="fd-section">
+            <div class="fd-section-title">
+                📉 净值走势
+                <div class="fd-chart-tabs">
+                    <button class="fd-chart-tab active" onclick="switchChartPeriod('1m', this)">1月</button>
+                    <button class="fd-chart-tab" onclick="switchChartPeriod('3m', this)">3月</button>
+                    <button class="fd-chart-tab" onclick="switchChartPeriod('6m', this)">6月</button>
+                    <button class="fd-chart-tab" onclick="switchChartPeriod('1y', this)">1年</button>
+                    <button class="fd-chart-tab" onclick="switchChartPeriod('all', this)">全部</button>
+                </div>
+            </div>
+            <div class="fd-chart-container">
+                <canvas id="fdNavChart"></canvas>
+                <div class="fd-chart-loading" id="fdChartLoading">加载中...</div>
+            </div>
+        </div>
+
+        <!-- 历史净值表 -->
+        <div class="fd-section">
+            <div class="fd-section-title">📅 历史净值</div>
+            <div class="fd-nav-table-wrap">
+                <table class="fd-nav-table">
+                    <thead><tr><th>净值日期</th><th>单位净值</th><th>累计净值</th><th>日涨幅</th></tr></thead>
+                    <tbody id="fdNavTableBody"><tr><td colspan="4" style="text-align:center;color:#999;">加载中...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="fd-footer">
+            <span>数据来源：天天基金 · 东方财富</span>
+            <button class="fd-calc-btn" onclick="openCalcFromDetail()">💰 套利计算</button>
+        </div>
+    </div>
+
+    <!-- Chart.js CDN (多源备选) -->
+    <script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"
+            onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'"></script>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=5.15"></script>
+</body>
+</html>

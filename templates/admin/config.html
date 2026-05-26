@@ -1,0 +1,106 @@
+{% extends "admin/base.html" %}
+{% block title %}系统配置{% endblock %}
+{% block page_title %}⚙️ 系统配置{% endblock %}
+{% block content %}
+
+<div class="admin-panel" style="max-width:800px">
+    <div class="panel-header">
+        <h3>站点配置</h3>
+        <button class="btn btn-primary" onclick="saveAllConfigs()">💾 保存所有修改</button>
+    </div>
+    <div class="panel-body">
+        <form id="configForm">
+            {% for cfg in configs %}
+            {% if 'password' in cfg.key.lower() or 'key' in cfg.key.lower() or 'secret' in cfg.key.lower() or 'webhook' in cfg.key.lower() %}
+            <div class="form-group">
+                <label>{{ cfg.description or cfg.key }}</label>
+                <input type="password" name="{{ cfg.key }}" value="{{ cfg.value }}"
+                       class="form-control" data-original="{{ cfg.value }}">
+                <small class="text-muted">当前值已隐藏，留空则不修改</small>
+                <code class="text-muted ml-2">{{ cfg.key }}</code>
+            </div>
+            {% elif cfg.key == 'announcement' %}
+            <div class="form-group">
+                <label>{{ cfg.description or cfg.key }}</label>
+                <textarea name="{{ cfg.key }}" rows="4" class="form-control"
+                          data-original="{{ cfg.value }}">{{ cfg.value }}</textarea>
+                <small class="text-muted">支持HTML</small>
+                <code class="text-muted ml-2">{{ cfg.key }}</code>
+            </div>
+            {% elif cfg.key == 'allow_register' or cfg.key == 'maintenance_mode' %}
+            <div class="form-group">
+                <label>{{ cfg.description or cfg.key }}</label>
+                <select name="{{ cfg.key }}" class="form-control" data-original="{{ cfg.value }}">
+                    <option value="1" {% if cfg.value=='1' %}selected{% endif %}>是</option>
+                    <option value="0" {% if cfg.value=='0' %}selected{% endif %}>否</option>
+                </select>
+                <code class="text-muted ml-2">{{ cfg.key }}</code>
+            </div>
+            {% else %}
+            <div class="form-group">
+                <label>{{ cfg.description or cfg.key }}</label>
+                <input type="text" name="{{ cfg.key }}" value="{{ cfg.value }}"
+                       class="form-control" data-original="{{ cfg.value }}">
+                <code class="text-muted ml-2">{{ cfg.key }}</code>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </form>
+    </div>
+</div>
+
+<div class="admin-panel mt-4 panel-info" style="max-width:800px">
+    <div class="panel-header"><h3>📖 配置说明</h3></div>
+    <div class="panel-body text-sm">
+        <ul class="config-help-list">
+            <li><strong>site_name</strong>: 站点名称，显示在页面标题和登录页</li>
+            <li><strong>allow_register</strong>: 关闭后新用户无法注册，已有用户可正常登录</li>
+            <li><strong>guest_preview_limit</strong>: 未登录用户可预览的数据条数，设为 0 则强制登录</li>
+            <li><strong>vip_price_monthly / yearly</strong>: VIP价格展示（实际支付需对接微信支付）</li>
+            <li><strong>alert_threshold / show_threshold</strong>: 告警阈值和展示阈值</li>
+            <li><strong>maintenance_mode</strong>: 开启后前台显示维护页面</li>
+            <li><strong>announcement</strong>: 站点公告，支持HTML格式</li>
+        </ul>
+    </div>
+</div>
+
+<script>
+function saveAllConfigs() {
+    const form = document.getElementById('configForm');
+    const configs = {};
+    let changed = false;
+
+    form.querySelectorAll('[data-original]').forEach(el => {
+        // 密码字段：如果值为默认占位符或空，不更新
+        if (el.type === 'password') {
+            if (!el.value) return;  // 留空不修改
+            configs[el.name] = el.value;
+            changed = true;
+            return;
+        }
+        if (el.value !== el.dataset.original) {
+            configs[el.name] = el.value;
+            changed = true;
+        }
+    });
+
+    if (!changed) { showToast('没有需要保存的修改', 'info'); return; }
+
+    fetch('/api/admin/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ configs })
+    })
+    .then(r => r.json())
+    .then(res => {
+        showToast(res.message || (res.success ? '配置已保存' : res.error), res.success ? 'success' : 'error');
+        if (res.success) {
+            // 更新 original 值
+            form.querySelectorAll('[data-original]').forEach(el => {
+                el.dataset.original = el.type === 'password' ? '****' : el.value;
+            });
+        }
+    });
+}
+</script>
+{% endblock %}

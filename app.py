@@ -1,0 +1,1014 @@
+"""
+LOF套利雷达 - Flask后端应用 v5.0
+修复:
+1-9. (v1-v3 历史修复)
+10. [v4.0] 新增用户认证系统（注册/登录/登出）
+11. [v4.0] 宽松访问模式：未登录可预览，详细数据+导出需登录
+12. [v5.0] 管理后台（用户管理 / 系统配置 / 操作日志）
+13. [v5.0] 操作审计日志
+"""
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, g
+import logging
+import os
+import requests as http_requests
+from datetime import datetime, timedelta
+from data_fetcher import DataFetcher
+from arbitrage_calculator import ArbitrageCalculator
+from database import DatabaseManager
+from auth import login_required, login_optional, do_login, do_logout, get_current_user, is_logged_in, admin_required, log_action
+from notifier import Notifier
+from dotenv import load_dotenv
+
+# 加载配置
+load_dotenv('.env')
+load_dotenv('config.env')  # 兼容旧配置
+
+app = Flask(__name__, template_folder='templates', static_folder='static')
+app.config['JSON_AS_ASCII'] = False
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'change-me-in-production')
+# Session 持久时间：默认1天，记住我则7天
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 初始化组件
+data_fetcher = DataFetcher()
+calculator = ArbitrageCalculator()
+db = DatabaseManager()
+
+# 初始化推送器
+wechat_webhook = os.getenv('WECHAT_WEBHOOK', '')
+mail_config = None
+if os.getenv('SMTP_USER') and os.getenv('SMTP_PASSWORD'):
+    mail_config = {
+        'server': os.getenv('SMTP_HOST', 'smtp.qq.com'),
+        'port': int(os.getenv('SMTP_PORT', '587')),
+        'user': os.getenv('SMTP_USER'),
+        'password': os.getenv('SMTP_PASSWORD'),
+        'to': os.getenv('EMAIL_TO', os.getenv('SMTP_USER'))
+    }
+notifier = Notifier(wechat_webhook, mail_config)
+
+# 已推送的基金
+alerted_funds = set()
+
+# 全局数据刷新状态
+refresh_status = {'last_refresh': None, 'refreshing': False, 'count': 0, 'nav_date': ''}
+
+
+@app.route('/')
+@login_optional
+def index():
+    """主页 — 宽松模式：不强制登录，但登录后体验更好"""
+    user = getattr(g, 'current_user', None)
+    return render_template('index.html', user=user)
+
+
+@app.route('/api/status')
+def api_status():
+    """系统状态接口（公开）"""
+    try:
+        total_funds = 0
+        premium_count = 0
+        discount_count = 0
+        nav_date = ''
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db.db_path)
+            c = conn.cursor()
+            c.execute('SELECT COUNT(DISTINCT fund_code) FROM premium_history')
+            total_funds = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) AND net_premium_return>=1.5")
+            premium_count = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) AND net_discount_return>=1.5")
+            discount_count = c.fetchone()[0]
+            c.execute("SELECT nav_date FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) LIMIT 1")
+            row = c.fetchone()
+            if row and row[0]:
+                nav_date = row[0]
+            conn.close()
+        except:
+            pass
+
+        return jsonify({
+            'success': True,
+            'last_refresh': refresh_status.get('last_refresh'),
+            'refreshing': refresh_status.get('refreshing', False),
+            'total_funds': total_funds,
+            'premium_count': premium_count,
+            'discount_count': discount_count,
+            'nav_date': nav_date or refresh_status.get('nav_date', ''),
+            'logged_in': is_logged_in(),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ==================== 认证相关路由 ====================
+
+@app.route('/login')
+def login():
+    """渲染登录页"""
+    if is_logged_in():
+        return redirect(url_for('index'))
+    return render_template('login.html',
+                           error=request.args.get('error'),
+                           default_username=request.args.get('username', ''),
+                           next_url=request.args.get('next'))
+
+
+@app.route('/register')
+def register():
+    """渲染注册页"""
+    if is_logged_in():
+        return redirect(url_for('index'))
+    return render_template('register.html',
+                           error=request.args.get('error'))
+
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """API: 用户登录"""
+    try:
+        data = request.get_json()
+        login_name = data.get('login_name', '').strip()
+        password = data.get('password', '')
+        remember = data.get('remember', True)
+
+        if not login_name or not password:
+            return jsonify({'success': False, 'error': '请填写用户名和密码'})
+
+        user = db.authenticate_user(login_name, password)
+        if not user:
+            return jsonify({'success': False, 'error': '用户名/邮箱或密码错误'})
+
+        do_login(user)
+
+        # session 持久时间
+        session.permanent = remember
+        if not remember:
+            app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
+        else:
+            app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+        logger.info(f"用户 {user['username']} 登录成功")
+
+        log_action('login', 'user', user['id'], f"用户 {user['username']} 登录成功")
+
+        return jsonify({
+            'success': True,
+            'message': '登录成功',
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'nickname': user.get('nickname') or user['username'],
+                'role': user.get('role', 'free')
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"登录失败: {e}")
+        return jsonify({'success': False, 'error': f'服务器内部错误: {str(e)}'}), 500
+
+
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    """API: 用户注册"""
+    try:
+        data = request.get_json()
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+        nickname = data.get('nickname', '').strip() or None
+
+        # 基本校验
+        if not username or not password:
+            return jsonify({'success': False, 'error': '请填写用户名和密码'})
+        if len(username) < 4 or len(username) > 20:
+            return jsonify({'success': False, 'error': '用户名需要4-20个字符'})
+        if not username.replace('_', '').isalnum():
+            return jsonify({'success': False, 'error': '用户名只能包含字母、数字和下划线'})
+        if len(password) < 6:
+            return jsonify({'success': False, 'error': '密码至少需要6个字符'})
+
+        success, error_msg = db.create_user(username, email, password, nickname)
+        if not success:
+            return jsonify({'success': False, 'error': error_msg})
+
+        logger.info(f"新用户注册成功: {username}")
+
+        log_action('register', 'user', None, f"新用户注册: {username}")
+        return jsonify({'success': True, 'message': '注册成功，请登录'})
+
+    except Exception as e:
+        logger.error(f"注册失败: {e}")
+        return jsonify({'success': False, 'error': f'服务器内部错误'}), 500
+
+
+@app.route('/api/logout')
+def api_logout():
+    """API: 用户登出"""
+    do_logout()
+    return jsonify({'success': True, 'message': '已退出登录'})
+
+
+@app.route('/api/auth/check')
+def api_auth_check():
+    """API: 检查登录状态（前端轮询用）"""
+    user = get_current_user()
+    if not user:
+        return jsonify({
+            'success': True,
+            'logged_in': False,
+            'user': None
+        })
+    return jsonify({
+        'success': True,
+        'logged_in': True,
+        'user': {
+            'id': user['id'],
+            'username': user['username'],
+            'nickname': user.get('nickname') or user['username'],
+            'role': user.get('role', 'free')
+        }
+    })
+
+
+@app.route('/api/user/profile')
+@login_required
+def api_user_profile():
+    """API: 获取当前用户信息"""
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'error': '未登录'}), 401
+    return jsonify({'success': True, 'data': user})
+
+
+@app.route('/api/user/profile', methods=['POST'])
+@login_required
+def api_update_profile():
+    """API: 更新用户资料（昵称、邮箱）"""
+    try:
+        data = request.get_json()
+        nickname = data.get('nickname', '').strip() or None
+        email = data.get('email', '').strip() or None
+
+        success, error_msg = db.update_user_profile(
+            session['user_id'], nickname=nickname, email=email
+        )
+        if not success:
+            return jsonify({'success': False, 'error': error_msg})
+
+        return jsonify({'success': True, 'message': '资料更新成功'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/password', methods=['PUT'])
+@login_required
+def api_change_password():
+    """API: 修改密码"""
+    try:
+        data = request.get_json()
+        old_pwd = data.get('old_password', '')
+        new_pwd = data.get('new_password', '')
+
+        if len(new_pwd) < 6:
+            return jsonify({'success': False, 'error': '新密码至少6个字符'})
+
+        success, error_msg = db.update_password(session['user_id'], old_pwd, new_pwd)
+        if not success:
+            return jsonify({'success': False, 'error': error_msg})
+
+        return jsonify({'success': True, 'message': '密码修改成功'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ==================== 用户自选相关路由 ====================
+
+@app.route('/api/favorites')
+@login_required
+def api_get_favorites():
+    """获取我的自选列表"""
+    favorites = db.get_favorites(session['user_id'])
+
+    # 合并最新基金数据
+    all_data = db.get_all_funds()
+    fund_map = {f['fund_code']: f for f in all_data}
+
+    enriched = []
+    for fav in favorites:
+        code = fav['fund_code']
+        if code in fund_map:
+            fd = fund_map[code]
+            enriched.append({
+                **fav,
+                'nav_date': fd.get('nav_date', ''),
+                'market_price': fd.get('market_price'),
+                'nav': fd.get('nav'),
+                'premium_rate': fd.get('premium_rate') or fd.get('discount_rate') or '-',
+                'profit_after_fee': fd.get('net_premium_return') or fd.get('net_discount_return') or 0,
+                'purchase_status': fd.get('purchase_status', ''),
+                'redeem_status': fd.get('redemption_status', '') or fd.get('redeem_status', ''),
+            })
+        else:
+            enriched.append(fav)
+
+    return jsonify({'success': True, 'data': enriched})
+
+
+@app.route('/api/favorites', methods=['POST'])
+@login_required
+def api_add_favorite():
+    """添加自选"""
+    data = request.get_json()
+    fund_code = data.get('fund_code', '')
+    fund_name = data.get('fund_name', '')
+    fund_type = data.get('fund_type', '')
+
+    if not fund_code:
+        return jsonify({'success': False, 'error': '缺少基金代码'})
+
+    db.add_favorite(session['user_id'], fund_code, fund_name, fund_type)
+    return jsonify({'success': True, 'message': '已添加到自选'})
+
+
+@app.route('/api/favorites/<fund_code>', methods=['DELETE'])
+@login_required
+def api_remove_favorite(fund_code):
+    """取消自选"""
+    db.remove_favorite(session['user_id'], fund_code)
+    return jsonify({'success': True, 'message': '已从自选移除'})
+
+
+@app.route('/api/refresh', methods=['POST'])
+def refresh_data():
+    """手动/定时刷新数据"""
+    global refresh_status
+
+    if refresh_status.get('refreshing', False):
+        return jsonify({
+            'success': False,
+            'error': '正在刷新中，请稍后重试',
+            'refreshing': True
+        })
+
+    try:
+        refresh_status['refreshing'] = True
+        logger.info("开始刷新数据...")
+
+        # 获取LOF列表
+        lof_list = data_fetcher.get_all_lof_list()
+        if not lof_list:
+            logger.error("LOF列表为空")
+            refresh_status['refreshing'] = False
+            return jsonify({'success': False, 'error': '获取LOF列表失败，请稍后重试'})
+
+        # 获取实时数据
+        fund_data_list = data_fetcher.fetch_all_data(lof_list)
+        if not fund_data_list:
+            logger.error("无有效数据")
+            refresh_status['refreshing'] = False
+            return jsonify({'success': False, 'error': '未获取到有效数据，可能非交易时间或接口异常'})
+
+        # 计算套利
+        fund_data_list = calculator.calculate_all(fund_data_list)
+
+        # 存入数据库
+        db.insert_data(fund_data_list)
+
+        # 检查告警
+        check_alerts(fund_data_list)
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 获取净值日期
+        nav_date = fund_data_list[0].get('nav_date', '') if fund_data_list else ''
+        refresh_status['last_refresh'] = now
+        refresh_status['count'] = len(fund_data_list)
+        refresh_status['nav_date'] = nav_date
+        refresh_status['refreshing'] = False
+
+        logger.info(f"数据刷新完成，共 {len(fund_data_list)} 只基金，净值日期 {nav_date}")
+
+        return jsonify({
+            'success': True,
+            'count': len(fund_data_list),
+            'nav_date': nav_date,
+            'time': now
+        })
+
+    except Exception as e:
+        logger.error(f"刷新数据失败: {e}")
+        refresh_status['refreshing'] = False
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/premium')
+def get_premium_funds():
+    """获取溢价榜单 — 宽松模式：未登录返回前20条预览"""
+    try:
+        limit = int(request.args.get('limit', 200))
+        fund_type = request.args.get('type', '')
+        # 未登录限制预览数量
+        if not is_logged_in() and limit > 30:
+            limit = 30
+        funds = db.get_all_premium_funds(limit, fund_type or None)
+
+        nav_date = ''
+        if funds:
+            nav_date = funds[0].get('nav_date', '')
+
+        # 未登录时隐藏部分敏感字段
+        if not is_logged_in():
+            for f in funds:
+                f['purchase_limit'] = None
+                # 标记为预览数据
+                f['_preview'] = True
+
+        return jsonify({
+            'success': True,
+            'data': funds,
+            'nav_date': nav_date,
+            'logged_in': is_logged_in(),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+    except Exception as e:
+        logger.error(f"获取溢价榜单失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/discount')
+def get_discount_funds():
+    """获取折价榜单 — 宽松模式：未登录返回前20条预览"""
+    try:
+        limit = int(request.args.get('limit', 200))
+        # 未登录限制预览数量
+        if not is_logged_in() and limit > 30:
+            limit = 30
+        funds = db.get_all_discount_funds(limit)
+
+        nav_date = ''
+        if funds:
+            nav_date = funds[0].get('nav_date', '')
+
+        if not is_logged_in():
+            for f in funds:
+                f['purchase_limit'] = None
+                f['_preview'] = True
+
+        return jsonify({
+            'success': True,
+            'data': funds,
+            'nav_date': nav_date,
+            'logged_in': is_logged_in(),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+    except Exception as e:
+        logger.error(f"获取折价榜单失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/qdii')
+def get_qdii_funds():
+    """获取QDII基金列表 — 宽松模式：未登录返回前20条预览"""
+    try:
+        limit = int(request.args.get('limit', 200))
+        fund_type = request.args.get('type', '')
+        if not is_logged_in() and limit > 30:
+            limit = 30
+        funds = db.get_qdii_funds(limit, fund_type or None)
+
+        nav_date = ''
+        if funds:
+            nav_date = funds[0].get('nav_date', '')
+
+        if not is_logged_in():
+            for f in funds:
+                f['_preview'] = True
+
+        return jsonify({
+            'success': True,
+            'data': funds,
+            'nav_date': nav_date,
+            'logged_in': is_logged_in(),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+    except Exception as e:
+        logger.error(f"获取QDII榜单失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/fund_types')
+def get_fund_types():
+    """获取基金分类列表"""
+    try:
+        include_qdii = request.args.get('qdii', '0') == '1'
+        types = db.get_fund_types(include_qdii)
+        return jsonify({
+            'success': True,
+            'data': types,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        logger.error(f"获取基金分类失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/history/<fund_code>')
+def get_history(fund_code):
+    """获取基金历史数据 — 需要登录"""
+    if not is_logged_in():
+        return jsonify({'success': False, 'error': '需要登录后查看历史数据', 'need_login': True}), 401
+    try:
+        days = int(request.args.get('days', 7))
+        # 免费用户限制7天，VIP可查看更多
+        if session.get('role') != 'vip' and days > 30:
+            days = 30
+        history = db.get_history(fund_code, days)
+
+        return jsonify({
+            'success': True,
+            'data': history
+        })
+
+    except Exception as e:
+        logger.error(f"获取历史数据失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/funds')
+def get_all_funds():
+    """获取所有基金（支持搜索）"""
+    try:
+        keyword = request.args.get('keyword', '')
+        funds = db.get_all_funds()
+
+        if keyword:
+            funds = [f for f in funds if keyword.lower() in f.get('name', '').lower() or keyword in f.get('code', '')]
+
+        return jsonify({
+            'success': True,
+            'data': funds,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+    except Exception as e:
+        logger.error(f"获取基金列表失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/search')
+def search_funds():
+    """搜索基金 — 宽松模式：未登录限制10条"""
+    try:
+        keyword = request.args.get('keyword', '')
+        if not keyword or len(keyword) < 1:
+            return jsonify({'success': True, 'data': [], 'count': 0})
+
+        funds = db.get_all_funds()
+        results = []
+        for f in funds:
+            fname = f.get('name', '')
+            fcode = f.get('code', '')
+            if keyword.lower() in fname.lower() or keyword in fcode:
+                results.append(f)
+
+        # 未登录限制结果数
+        if not is_logged_in() and len(results) > 15:
+            results = results[:15]
+
+        return jsonify({
+            'success': True,
+            'data': results,
+            'count': len(results),
+            'logged_in': is_logged_in()
+        })
+
+    except Exception as e:
+        logger.error(f"搜索失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def check_alerts(fund_data_list):
+    """检查并发送告警"""
+    global alerted_funds
+    threshold = float(os.getenv('ARBITRAGE_THRESHOLD_ALERT', '3.0'))
+
+    alert_premium = []
+    alert_discount = []
+
+    for fund in fund_data_list:
+        try:
+            prem = fund.get('premium_arbitrage', {})
+            if isinstance(prem, dict) and prem.get('net_return', 0) >= threshold:
+                fund_key = f"{fund['code']}_premium"
+                if fund_key not in alerted_funds:
+                    alert_premium.append({
+                        'code': fund['code'],
+                        'name': fund['name'],
+                        'net_return': prem.get('net_return', 0),
+                        'purchase_status': fund.get('purchase_status', '未知'),
+                    })
+                    alerted_funds.add(fund_key)
+
+            disc = fund.get('discount_arbitrage', {})
+            if isinstance(disc, dict) and disc.get('net_return', 0) >= threshold:
+                fund_key = f"{fund['code']}_discount"
+                if fund_key not in alerted_funds:
+                    alert_discount.append({
+                        'code': fund['code'],
+                        'name': fund['name'],
+                        'net_return': disc.get('net_return', 0),
+                    })
+                    alerted_funds.add(fund_key)
+        except Exception as e:
+            logger.error(f"检查告警{fund.get('code')}失败: {e}")
+            continue
+
+    if alert_premium:
+        try:
+            notifier.send_arbitrage_alert(alert_premium, 'premium')
+            logger.info(f"发送了 {len(alert_premium)} 条溢价告警")
+        except Exception as e:
+            logger.error(f"发送溢价告警失败: {e}")
+
+    if alert_discount:
+        try:
+            notifier.send_arbitrage_alert(alert_discount, 'discount')
+            logger.info(f"发送了 {len(alert_discount)} 条折价告警")
+        except Exception as e:
+            logger.error(f"发送折价告警失败: {e}")
+
+    # 清理已过期告警
+    current_codes = set()
+    for fund in fund_data_list:
+        prem = fund.get('premium_arbitrage', {})
+        disc = fund.get('discount_arbitrage', {})
+        if isinstance(prem, dict) and prem.get('net_return', 0) >= threshold:
+            current_codes.add(f"{fund['code']}_premium")
+        if isinstance(disc, dict) and disc.get('net_return', 0) >= threshold:
+            current_codes.add(f"{fund['code']}_discount")
+    alerted_funds = alerted_funds.intersection(current_codes)
+
+
+# ==================== 基金详情代理接口 (v5.1) ====================
+# 解决前端直接调东方财富 API 的 CORS 跨域问题
+
+@app.route('/api/fund/detail')
+def api_fund_detail():
+    """代理获取基金详情：基本信息 + 近期业绩 + 基金经理"""
+    code = request.args.get('code', '').strip()
+    if not code:
+        return jsonify({'success': False, 'error': '缺少基金代码'}), 400
+
+    result = {'code': code, 'basic': {}, 'performance': {}, 'manager': ''}
+    # 必须使用 iPhone UA，否则 API 返回"网络繁忙"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+        'Referer': 'https://mpservice.com/',
+    }
+    api_base = 'https://fundmobapi.eastmoney.com/FundMNewApi'
+    params = 'FCODE={}&deviceid=Wap&version=2.0.0&product=EFund&plat=iPhone&osVersion=16.6&appType=iPhone'
+
+    # 1) 基本信息
+    try:
+        url1 = f'{api_base}/FundMNNBasicInformation?{params.format(code)}'
+        r1 = http_requests.get(url1, headers=headers, timeout=10)
+        r1.raise_for_status()
+        d1 = r1.json().get('Datas') or {}
+        result['basic'] = {
+            'name': d1.get('SHORTNAME', ''),
+            'type': d1.get('FTYPE', ''),
+            'setup_date': (d1.get('ESTABDATE') or d1.get('ISSEDATE') or ''),
+            'scale': d1.get('ENDNAV', ''),
+            'company': d1.get('JJGS', ''),
+            'index_name': d1.get('INDEXNAME', ''),
+            'purchase_rate': d1.get('RATE', ''),
+            'source_rate': d1.get('SOURCERATE', ''),
+            'cycle': d1.get('CYCLE', ''),
+            'risk_level': d1.get('RISKLEVEL', ''),
+            'yzba': d1.get('YZBA', ''),
+            'bench': d1.get('BENCH', ''),
+            'sgzt': d1.get('SGZT', ''),
+            'shzt': d1.get('SHZT', ''),
+        }
+        # 基本信息接口本身也包含近一周收益率
+        syl_z = d1.get('SYL_Z')
+        if syl_z and syl_z != '--':
+            result['performance']['1w'] = syl_z
+    except Exception as e:
+        logger.warning(f'基金详情-基本信息失败 {code}: {e}')
+
+    # 2) 近期业绩
+    try:
+        url2 = f'{api_base}/FundMNPeriodIncrease?{params.format(code)}'
+        r2 = http_requests.get(url2, headers=headers, timeout=10)
+        r2.raise_for_status()
+        items = r2.json().get('Datas') or []
+        title_map = {'Z': '1w', 'Y': '1m', '3Y': '3m', '6Y': '6m', '1N': '1y', '3N': '3y', 'LN': 'all'}
+        perf = result['performance']
+        if isinstance(items, list):
+            for item in items:
+                key = title_map.get(item.get('title', ''))
+                if key:
+                    perf[key] = item.get('syl', '')
+        result['performance'] = perf
+    except Exception as e:
+        logger.warning(f'基金详情-业绩数据失败 {code}: {e}')
+
+    # 3) 基金经理
+    try:
+        url3 = f'{api_base}/FundMNInverstPosition?{params.format(code)}'
+        r3 = http_requests.get(url3, headers=headers, timeout=10)
+        r3.raise_for_status()
+        d3 = r3.json().get('Datas')
+        if isinstance(d3, list) and len(d3) > 0:
+            managers = [x.get('MANAGERNAME', '') for x in d3 if x.get('MANAGERNAME')]
+            result['manager'] = '、'.join(managers)
+        elif isinstance(d3, dict) and d3.get('MANAGERNAME'):
+            result['manager'] = d3['MANAGERNAME']
+    except Exception as e:
+        logger.warning(f'基金详情-基金经理失败 {code}: {e}')
+
+    return jsonify({'success': True, 'data': result})
+
+
+@app.route('/api/fund/nav_history')
+def api_fund_nav_history():
+    """代理获取历史净值（解决 JSONP 跨域问题）"""
+    code = request.args.get('code', '').strip()
+    if not code:
+        return jsonify({'success': False, 'error': '缺少基金代码'}), 400
+
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('pageSize', 120))
+
+    try:
+        url = f'https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize={page_size}'
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://fund.eastmoney.com/',
+        }
+        r = http_requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return jsonify({
+            'success': True,
+            'data': data.get('Data', {}),
+            'totalCount': data.get('TotalCount', 0),
+        })
+    except Exception as e:
+        logger.warning(f'基金历史净值获取失败 {code}: {e}')
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ==================== 管理后台路由 (v5.0) ====================
+
+@app.route('/admin')
+@admin_required
+def admin_dashboard():
+    """管理后台 - 仪表盘"""
+    stats = db.get_stats()
+    configs = db.get_all_configs()
+    recent_logs = db.get_logs(limit=10)
+    return render_template('admin/dashboard.html',
+                           user=get_current_user(),
+                           stats=stats,
+                           configs=configs,
+                           recent_logs=recent_logs)
+
+
+@app.route('/admin/users')
+@admin_required
+def admin_users():
+    """管理后台 - 用户列表"""
+    page = int(request.args.get('page', 1))
+    keyword = request.args.get('keyword', '').strip()
+    result = db.get_all_users(page=page, per_page=20, keyword=keyword)
+    return render_template('admin/users.html',
+                           user=get_current_user(),
+                           users=result,
+                           keyword=keyword)
+
+
+@app.route('/admin/user/<int:user_id>')
+@admin_required
+def admin_user_detail(user_id):
+    """管理后台 - 用户详情/编辑页"""
+    target_user = db.get_user_for_admin(user_id)
+    if not target_user:
+        return redirect(url_for('admin_users'))
+    return render_template('admin/edit_user.html',
+                           user=get_current_user(),
+                           target=target_user)
+
+
+@app.route('/admin/config')
+@admin_required
+def admin_config():
+    """管理后台 - 系统配置"""
+    configs = db.get_all_configs()
+    return render_template('admin/config.html',
+                           user=get_current_user(),
+                           configs=configs)
+
+
+@app.route('/admin/logs')
+@admin_required
+def admin_logs():
+    """管理后台 - 操作日志"""
+    action = request.args.get('action', '')
+    limit = int(request.args.get('limit', 100))
+    logs = db.get_logs(limit=limit, action=action or None)
+    return render_template('admin/logs.html',
+                           user=get_current_user(),
+                           logs=logs,
+                           action_filter=action)
+
+
+# ==================== 管理后台 API (v5.0) ====================
+
+@app.route('/api/admin/stats')
+@admin_required
+def api_admin_stats():
+    """API: 获取仪表盘统计数据（AJAX刷新用）"""
+    stats = db.get_stats()
+    return jsonify({'success': True, 'data': stats})
+
+
+@app.route('/api/admin/users')
+@admin_required
+def api_admin_users():
+    """API: 获取用户列表(JSON)"""
+    page = int(request.args.get('page', 1))
+    keyword = request.args.get('keyword', '').strip()
+    result = db.get_all_users(page=page, per_page=20, keyword=keyword)
+    return jsonify({'success': True, 'data': result})
+
+
+@app.route('/api/admin/user/<int:user_id>', methods=['POST'])
+@admin_required
+def api_admin_update_user(user_id):
+    """API: 管理员更新用户信息"""
+    try:
+        data = request.get_json()
+        success, error = db.admin_update_user(user_id, **data)
+        if not success:
+            return jsonify({'success': False, 'error': error})
+
+        # 记录日志
+        detail = f"更新用户 {user_id} 信息: {list(data.keys())}"
+        log_action('update_user', 'user', user_id, detail)
+
+        return jsonify({'success': True, 'message': '用户信息已更新'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/user/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def api_admin_reset_password(user_id):
+    """API: 管理员重置用户密码"""
+    try:
+        data = request.get_json()
+        new_password = data.get('password', '')
+        if len(new_password) < 6:
+            return jsonify({'success': False, 'error': '密码至少6个字符'})
+
+        success, error = db.admin_reset_password(user_id, new_password)
+        if not success:
+            return jsonify({'success': False, 'error': error})
+
+        log_action('reset_password', 'user', user_id, f"重置了用户 {user_id} 的密码")
+        return jsonify({'success': True, 'message': f'密码已重置为: {new_password}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/user/<int:user_id>/ban', methods=['POST'])
+@admin_required
+def api_admin_ban_user(user_id):
+    """API: 封禁/解封用户"""
+    try:
+        data = request.get_json()
+        ban = data.get('ban', True)  # True=封禁, False=解封
+
+        if ban:
+            # 默认封禁30天
+            days = int(data.get('days', 30))
+            banned_until = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            success, error = db.admin_update_user(user_id, is_active=0, banned_until=banned_until)
+            action_text = f"封禁{days}天"
+        else:
+            success, error = db.admin_update_user(user_id, is_active=1, banned_until=None)
+            action_text = "解除封禁"
+
+        if not success:
+            return jsonify({'success': False, 'error': error})
+
+        log_action(f'{"ban" if ban else "unban"}_user', 'user', user_id, f"{action_text} 用户 {user_id}")
+        return jsonify({'success': True, 'message': f'已{action_text}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/user/<int:user_id>/role', methods=['POST'])
+@admin_required
+def api_admin_change_role(user_id):
+    """API: 更改用户角色"""
+    try:
+        data = request.get_json()
+        new_role = data.get('role', 'free')
+        if new_role not in ('free', 'vip', 'admin'):
+            return jsonify({'success': False, 'error': '无效的角色'})
+
+        success, error = db.admin_update_user(user_id, role=new_role)
+        if not success:
+            return jsonify({'success': False, 'error': error})
+
+        log_action('change_role', 'user', user_id, f"将用户 {user_id} 角色改为 {new_role}")
+        return jsonify({'success': True, 'message': f'角色已更改为 {new_role}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/user/<int:user_id>', methods=['DELETE'])
+@admin_required
+def api_admin_delete_user(user_id):
+    """API: 软删除用户"""
+    success, error = db.admin_soft_delete_user(user_id)
+    if not success:
+        return jsonify({'success': False, 'error': error})
+
+    log_action('delete_user', 'user', user_id, f"软删除了用户 {user_id}")
+    return jsonify({'success': True, 'message': '用户已删除'})
+
+
+@app.route('/api/admin/user/<int:user_id>/restore', methods=['POST'])
+@admin_required
+def api_admin_restore_user(user_id):
+    """API: 恢复被软删除的用户"""
+    success, error = db.admin_restore_user(user_id)
+    if not success:
+        return jsonify({'success': False, 'error': error})
+
+    log_action('restore_user', 'user', user_id, f"恢复了用户 {user_id}")
+    return jsonify({'success': True, 'message': '用户已恢复'})
+
+
+@app.route('/api/admin/config', methods=['POST'])
+@admin_required
+def api_admin_update_config():
+    """API: 批量更新系统配置"""
+    try:
+        data = request.get_json()
+        updates = data.get('configs', {})
+        results = []
+        for key, value in updates.items():
+            ok = db.set_config(key, value, updated_by=session.get('user_id'))
+            results.append({'key': key, 'ok': ok})
+            if ok:
+                log_action('update_config', 'config', None, f'修改配置: {key} = {value}')
+
+        failed = [r['key'] for r in results if not r['ok']]
+        if failed:
+            return jsonify({
+                'success': False,
+                'error': f'部分配置更新失败: {", ".join(failed)}'
+            })
+
+        return jsonify({'success': True, 'message': f'已更新 {len(results)} 项配置'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/logs')
+@admin_required
+def api_admin_logs():
+    """API: 获取操作日志(JSON)"""
+    action = request.args.get('action', '')
+    limit = int(request.args.get('limit', 100))
+    logs = db.get_logs(limit=limit, action=action or None)
+    return jsonify({'success': True, 'data': logs})
+
+
+host = os.getenv('FLASK_HOST', '0.0.0.0')
+port = int(os.getenv('FLASK_PORT', '5000'))
+debug = os.getenv('DEBUG', 'false').lower() == 'true'
+
+if __name__ == '__main__':
+    logger.info(f"LOF套利雷达启动，访问地址: http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug)

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Environment
+.env
+config.env
+
+# Database
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Deploy/Debug scripts (contain credentials)
+deploy_*.py
+_deploy_*.py
+debug_*.py
+check_deploy*.py
+fix_*.py
+_test_*.py
+
+# WorkBuddy
+.workbuddy/
