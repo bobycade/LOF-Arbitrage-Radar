@@ -1,174 +1,86 @@
-# LOF套利雷达 - 项目概览
+# LOF-Arbitrage-Radar - Project Overview
 
-## 📋 项目说明
+## Summary
 
-这是一个完整的LOF基金套利监控与预警系统，已根据你的需求定制开发完成。
+A complete LOF fund arbitrage monitoring and alert system.
 
-## ✅ 已完成的功能
+## Features
 
-### 核心功能
-- ✅ 全市场LOF基金扫描（股票/混合/商品/QDII型）
-- ✅ 实时场内价格采集（东方财富行情）
-- ✅ 盘中实时估值iNAV获取（天天基金）
-- ✅ 溢价/折价套利收益自动计算（已扣费）
-- ✅ 申购状态实时查询（正常/限额/暂停）
-- ✅ 历史溢价记录保存（SQLite数据库）
+### Core
+- Full-market LOF fund scanning (Equity / Mixed / Commodity / QDII)
+- Real-time on-market price collection (EastMoney API)
+- Intraday iNAV estimation (TianTian Fund)
+- Premium/discount arbitrage yield calculation (after fees)
+- Subscription status real-time query (Normal / Limited / Suspended)
+- Historical premium records (SQLite)
 
-### 套利计算
-- ✅ 溢价套利：`净收益 = 溢价率 - 申购费 - 卖出佣金`
-- ✅ 折价套利：`净收益 = 折价率 - 买入佣金 - 赎回费`
-- ✅ 阈值设置：≥1.5%显示，≥3%高亮并推送
+### Arbitrage Calculation
+- Premium: `Net Return = Premium Rate - Subscription Fee - Sell Commission`
+- Discount: `Net Return = Discount Rate - Buy Commission - Redemption Fee`
+- Threshold: Show >= 1.5%, Highlight + Push >= 3%
 
-### 网页界面（4个标签页）
-- ✅ 🔴 溢价套利榜单
-- ✅ 🟢 折价套利榜单
-- ✅ 🌏 QDII专区（重点标注）
-- ✅ 🔍 基金搜索功能
-- ✅ 📈 历史趋势图表（7/30天）
-- ✅ 📱 响应式设计（支持手机）
+### Web Interface
+- Premium arbitrage rankings
+- Discount arbitrage rankings
+- QDII dedicated section
+- Fund search
+- Historical NAV trend charts (Chart.js)
+- Responsive design (PC + Mobile)
 
-### 告警推送
-- ✅ 企业微信群机器人推送
-- ✅ 邮件推送（SMTP）
-- ✅ 净溢价/净折价≥3%自动推送
-- ✅ 避免重复推送（已告警基金不再推送，直至溢价消失）
+### Alerts
+- WeChat Work bot push
+- Email notification (SMTP)
+- Auto trigger when net premium/discount >= 3%
+- Duplicate prevention
 
-### 自动化
-- ✅ 定时数据刷新（每5分钟，仅交易时间）
-- ✅ 开机自启动（Supervisor进程管理）
-- ✅ 自动清理旧数据（可配置保留天数）
+### Automation
+- Scheduled data refresh (every 5 min, trading hours only)
+- Auto-start via Supervisor
+- Auto cleanup of old data
 
-## 📦 项目文件清单
+## Project Structure
 
 ```
-lof_arbitrage/
-├── app.py                      # Flask主应用
-├── data_fetcher.py            # 数据采集模块（东方财富/天天基金）
-├── arbitrage_calculator.py    # 套利计算逻辑
-├── database.py                # SQLite数据库管理
-├── notifier.py                # 企业微信/邮件推送
-├── scheduler.py               # 定时数据刷新脚本
-├── requirements.txt           # Python依赖
-├── .env.example              # 环境变量配置模板
-├── quickstart.sh             # 一键部署脚本
-├── README.md                 # 完整部署指南
-├── DEPLOY.md                 # 服务器采购指引
-├── PROJECT.md                # 本文件
+LOF-Arbitrage-Radar/
+├── app.py                      # Flask main application
+├── data_fetcher.py             # Market data fetching (EastMoney API)
+├── arbitrage_calculator.py     # Arbitrage profit calculation
+├── database.py                 # SQLite database management
+├── auth.py                     # User authentication & authorization
+├── notifier.py                 # WeChat Work + Email notifications
+├── scheduler.py                # Cron-like data refresh scheduler
+├── requirements.txt            # Python dependencies
+├── .env.example                # Environment config template
+├── quickstart.sh               # One-click deploy script
+├── LICENSE                     # MIT License
+├── README.md                   # Project documentation
+├── DEPLOY.md                   # Deployment guide
 ├── templates/
-│   └── index.html             # 主页（4个标签页）
+│   ├── index.html              # Main page
+│   ├── login.html              # Login page
+│   ├── register.html           # Registration page
+│   └── admin/                  # Admin panel templates
 └── static/
     ├── css/
-    │   └── style.css         # 响应式样式
+    │   ├── style.css           # Main stylesheet
+    │   └── admin.css           # Admin panel styles
     └── js/
-        └── app.js             # 前端逻辑（包含Plotly图表）
+        ├── app.js              # Frontend logic
+        └── admin.js            # Admin panel logic
 ```
 
-## 🚀 下一步：部署到腾讯云
+## Tech Stack
 
-### 1. 购买腾讯云轻量服务器
+| Layer | Tech |
+|-------|------|
+| Backend | Python 3 + Flask |
+| Frontend | Vanilla JS + Chart.js |
+| Database | SQLite |
+| Process Manager | Supervisor |
+| Reverse Proxy | Nginx |
 
-详见：**[DEPLOY.md](DEPLOY.md)**
+## Documentation
 
-推荐配置：
-- 地域：北京/上海/广州
-- 镜像：Ubuntu 20.04 LTS
-- 套餐：2核2G（约¥50-80/月）
-
-### 2. 上传项目文件到服务器
-
-**方式1：使用SCP（Windows本地）**
-```powershell
-scp -r "C:\Users\CC\WorkBuddy\Claw\lof_arbitrage" root@YOUR_IP:/root/
-```
-
-**方式2：先上传到GitHub，再用Git克隆**
-```bash
-git clone YOUR_REPO_URL lof_arbitrage
-```
-
-### 3. 运行一键部署脚本
-
-```bash
-cd /root/lof_arbitrage
-chmod +x quickstart.sh
-bash quickstart.sh
-```
-
-### 4. 配置环境变量
-
-```bash
-nano .env
-```
-
-必须配置：
-- `WECHAT_WEBHOOK`：企业微信群机器人webhook地址
-- `SMTP_PASSWORD`：邮箱SMTP授权码（不是邮箱密码！）
-
-### 5. 重启应用
-
-```bash
-supervisorctl restart lof_arbitrage
-```
-
-### 6. 访问网页
-
-浏览器打开：`http://YOUR_IP:5000`
-
-## ⚙️ 配置参数说明
-
-在`.env`文件中可调整以下参数：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `REFRESH_INTERVAL` | 5 | 数据刷新间隔（分钟） |
-| `ALERT_THRESHOLD` | 3.0 | 告警阈值（%） |
-| `SHOW_THRESHOLD` | 1.5 | 显示阈值（%） |
-
-## 📊 使用流程
-
-1. **访问网页**：`http://YOUR_IP:5000`
-2. **查看榜单**：
-   - 溢价套利：寻找净溢价≥3%的LOF
-   - 折价套利：寻找净折价≥3%的LOF
-   - QDII专区：重点关注高溢价品种
-3. **点击基金代码**：查看历史溢价走势
-4. **等待推送**：有≥3%套利机会时会自动收到微信+邮件
-
-## 💡 套利策略建议
-
-### 溢价套利
-- **触发条件**：净溢价≥3%
-- **操作流程**：场外申购 → 转托管到场内 → 场内卖出
-- **等待时间**：约2-3个交易日
-- **风险提示**：等待期内净值下跌，溢价可能消失
-- **特别注意**：暂停申购的基金无法操作
-
-### 折价套利
-- **触发条件**：净折价≥3%
-- **操作流程**：场内买入 → 转托管到场外 → 场外赎回
-- **等待时间**：约3-4个交易日
-- **风险提示**：赎回价不确定，净值可能继续下跌
-- **特别注意**：赎回费较高（尤其持有<7天）
-
-## ❓ 常见问题
-
-**Q: 数据多久刷新一次？**  
-A: 每5分钟自动刷新，仅在交易时间（周一至周五9:30-15:00）执行。
-
-**Q: 为什么有些LOF没有数据？**  
-A: 可能是停牌、数据接口临时问题、或该LOF不支持iNAV实时估值。
-
-**Q: 微信告警收不到？**  
-A: 检查`.env`中的`WECHAT_WEBHOOK`是否正确；企业微信群机器人webhook有效期7天，过期需重新添加。
-
-**Q: 邮件发送失败？**  
-A: 确认邮箱开启了SMTP服务，`SMTP_PASSWORD`填写的是授权码而非邮箱密码。
-
-## 📞 需要帮助？
-
-详细部署文档：**[README.md](README.md)**  
-服务器采购指引：**[DEPLOY.md](DEPLOY.md)**
-
----
-
-项目已交付完成，祝你套利顺利！🎉
+- [README.md](README.md) - Project documentation (bilingual)
+- [DEPLOY.md](DEPLOY.md) - Deployment guide
+- [LICENSE](LICENSE) - MIT License

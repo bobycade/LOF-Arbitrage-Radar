@@ -1,177 +1,149 @@
-# 服务器采购指引
+# Deployment Guide
 
-## 推荐方案：腾讯云轻量应用服务器
+## Requirements
 
-### 为什么选腾讯云？
+- A Linux server (Ubuntu 20.04+ recommended)
+- Python 3.8+
+- Public network access (to fetch market data from EastMoney APIs)
 
-1. **访问速度快**：服务器在国内，访问东方财富、天天基金等数据接口速度快且稳定
-2. **价格实惠**：新用户首年优惠大，约¥50-80/月
-3. **运维简单**：提供完善的控制台和一键安装脚本
-4. **稳定可靠**：腾讯云基础设施成熟，故障率低
-
-### 购买步骤
-
-#### 1. 注册/登录腾讯云
-
-- 访问：https://cloud.tencent.com/
-- 点击右上角"注册"或"登录"
-- 推荐使用微信扫码登录，方便快捷
-
-#### 2. 进入轻量应用服务器页面
-
-- 登录后，搜索"轻量应用服务器"
-- 或直接访问：https://cloud.tencent.com/product/lighthouse
-
-#### 3. 选择配置
-
-**推荐配置：**
-
-| 配置项 | 推荐选择 | 说明 |
-|--------|---------|------|
-| **地域** | 北京/上海/广州 | 选择离你最近的 |
-| **可用区** | 随机选择 | 都可以 |
-| **镜像** | Ubuntu 20.04 LTS | 社区支持好 |
-| **套餐** | 2核2G | 性能足够，约¥50-80/月 |
-| **流量包** | 选择包含500GB/月 | 这个项目流量需求不大 |
-
-#### 4. 设置服务器
-
-- **实例名称**：LOF套利雷达（随便填）
-- **购买时长**：首年推荐1年（有优惠）
-- **数量**：1台
-
-#### 5. 设置登录方式
-
-推荐使用**密码登录**：
-- 设置root密码（务必记住！）
-- 至少8位，包含大小写字母+数字
-
-#### 6. 提交订单
-
-- 检查配置无误后，点击"立即购买"
-- 支付费用
-- 等待服务器创建（约1-5分钟）
-
-### 购买后操作
-
-#### 1. 获取服务器IP地址
-
-- 登录腾讯云控制台
-- 进入"轻量应用服务器"
-- 查看服务器实例的**公网IP**（如：1.2.3.4）
-
-#### 2. 测试连接
-
-**Windows用户：**
-```powershell
-# 打开PowerShell，替换YOUR_IP
-ssh root@YOUR_IP
-```
-
-**Mac/Linux用户：**
-```bash
-ssh root@YOUR_IP
-```
-
-输入密码（密码不会显示），连接成功后看到欢迎信息。
-
-#### 3. 上传项目文件
-
-**方式1：Git（推荐）**
-```bash
-# 将项目上传到GitHub后
-cd /root
-git clone YOUR_REPO_URL lof_arbitrage
-cd lof_arbitrage
-```
-
-**方式2：SCP（Windows本地）**
-```powershell
-# 在本地PowerShell执行
-scp -r "C:\Users\CC\WorkBuddy\Claw\lof_arbitrage" root@YOUR_IP:/root/
-```
-
-#### 4. 运行一键部署脚本
+## Step 1: Server Preparation
 
 ```bash
-cd /root/lof_arbitrage
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install dependencies
+sudo apt install -y python3 python3-pip git sqlite3 supervisor nginx
+```
+
+## Step 2: Clone & Configure
+
+```bash
+git clone https://github.com/bobycade/LOF-Arbitrage-Radar.git
+cd LOF-Arbitrage-Radar
+pip3 install -r requirements.txt
+cp .env.example .env
+nano .env  # Edit with your config
+```
+
+## Step 3: One-click Deploy
+
+```bash
 chmod +x quickstart.sh
 bash quickstart.sh
 ```
 
-#### 5. 配置环境变量
+This script will:
+- Install Python dependencies
+- Configure Supervisor for process management
+- Set up Nginx reverse proxy
+- Configure auto-refresh cron job
 
-```bash
-nano .env
+## Step 4: Nginx Configuration
+
+Create `/etc/nginx/sites-available/lof_arbitrage`:
+
+```nginx
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 120s;
+    }
+
+    location /static/ {
+        alias /path/to/LOF-Arbitrage-Radar/static/;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+    }
+}
 ```
 
-编辑以下关键配置：
-
 ```bash
-WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
-SMTP_PASSWORD=your_smtp_auth_code
+sudo ln -s /etc/nginx/sites-available/lof_arbitrage /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx
 ```
 
-#### 6. 重启应用
+## Step 5: Supervisor Configuration
 
-```bash
-supervisorctl restart lof_arbitrage
+Create `/etc/supervisor/conf.d/lof_arbitrage.conf`:
+
+```ini
+[program:lof_arbitrage_app]
+command=/usr/bin/python3 /path/to/LOF-Arbitrage-Radar/app.py
+directory=/path/to/LOF-Arbitrage-Radar
+user=www-data
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/lof_arbitrage_app.log
+environment=PYTHONUNBUFFERED="1"
+
+[program:lof_arbitrage_scheduler]
+command=/usr/bin/python3 /path/to/LOF-Arbitrage-Radar/scheduler.py
+directory=/path/to/LOF-Arbitrage-Radar
+user=www-data
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/lof_arbitrage_scheduler.log
+environment=PYTHONUNBUFFERED="1"
 ```
 
-#### 7. 访问网页
+```bash
+sudo supervisorctl reread && sudo supervisorctl update
+sudo supervisorctl start lof_arbitrage_app lof_arbitrage_scheduler
+```
 
-浏览器访问：`http://YOUR_IP:5000`
+## Environment Variables
 
-### 费用说明
+Key variables in `.env`:
 
-| 项目 | 价格 |
-|------|------|
-| 轻量应用服务器（2核2G） | 约¥50-80/月 |
-| 流量包 | 已包含 |
-| 其他费用 | 无 |
+| Variable | Description |
+|----------|-------------|
+| `SECRET_KEY` | Flask session secret (generate a random string!) |
+| `WECHAT_WEBHOOK` | WeChat Work bot webhook URL |
+| `SMTP_USER` / `SMTP_PASSWORD` | Email notification credentials |
+| `ALERT_THRESHOLD` | Alert push threshold (%) |
 
-**年费预估**：约¥600-1000/年
+## Verify Deployment
 
-### 备选方案
+```bash
+# Check process status
+sudo supervisorctl status
 
-#### 阿里云
+# Check Nginx
+curl -I http://localhost
 
-- 类似配置，价格相近
-- 访问：https://www.aliyun.com/product/swas
-- 适合已有阿里云账号的用户
+# Check Flask directly
+curl -s http://localhost:5000 | head -20
+```
 
-#### 华为云
+## Maintenance
 
-- 略便宜约¥10/月
-- 访问：https://www.huaweicloud.com/product/lts.html
-- 生态不如腾讯云
+```bash
+# Restart application
+sudo supervisorctl restart lof_arbitrage_app
 
-### 不推荐：国外云服务器
+# View logs
+tail -f /var/log/lof_arbitrage_app.log
 
-**不推荐使用：**
-- Vultr、DigitalOcean、RackNerd等国外云
-
-**原因：**
-1. 访问国内数据接口（东方财富、天天基金）容易被限速或屏蔽
-2. 网络延迟高，影响数据实时性
-3. 可能违反数据接口的使用条款
-
-### 注意事项
-
-1. **密码安全**：root密码请妥善保管
-2. **防火墙**：记得在腾讯云控制台开放5000端口
-3. **定期备份**：定期备份数据库文件`lof_data.db`
-4. **监控费用**：注意流量包使用情况，避免超额
-5. **及时续费**：服务器到期后数据会被清除
-
-### 购买链接
-
-**腾讯云轻量服务器：**
-https://cloud.tencent.com/product/lighthouse
-
-**阿里云轻量应用服务器：**
-https://www.aliyun.com/product/swas
+# Backup database
+cp lof_data.db lof_data_$(date +%Y%m%d).bak.db
+```
 
 ---
 
-有问题？查看完整文档：[README.md](README.md)
+For project details, see [README.md](README.md).
