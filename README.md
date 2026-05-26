@@ -1,6 +1,14 @@
-# LOF-Arbitrage-Radar (LOF套利雷达)
+# LOF-Arbitrage-Radar
 
-实时监控 LOF 基金溢价/折价套利机会的 Web 应用，支持自动数据刷新、历史趋势分析、多渠道告警推送。
+[中文](#中文) | [English](#english)
+
+---
+
+<a id="english"></a>
+
+## LOF-Arbitrage-Radar
+
+A real-time web application for monitoring LOF (Listed Open-end Fund) premium/discount arbitrage opportunities, with auto data refresh, historical trend analysis, and multi-channel alert notifications.
 
 ## Features
 
@@ -93,6 +101,7 @@ Copy `.env.example` to `.env` and configure:
 |----------|---------|-------------|
 | `SERVER_HOST` | `0.0.0.0` | Server bind address |
 | `SERVER_PORT` | `5000` | Server port |
+| `SECRET_KEY` | - | Flask session secret key |
 | `WECHAT_WEBHOOK` | - | WeChat Work bot webhook URL |
 | `SMTP_SERVER` | `smtp.qq.com` | SMTP server |
 | `SMTP_USER` | - | SMTP username |
@@ -103,19 +112,19 @@ Copy `.env.example` to `.env` and configure:
 
 ## Arbitrage Strategy
 
-### Premium Arbitrage (溢价套利)
+### Premium Arbitrage
 - **Trigger**: Net premium >= 3%
 - **Flow**: Subscribe (off-market) -> Transfer -> Sell (on-market)
 - **Risk**: NAV may drop during T+2 settlement period
 
-### Discount Arbitrage (折价套利)
+### Discount Arbitrage
 - **Trigger**: Net discount >= 3%
 - **Flow**: Buy (on-market) -> Transfer -> Redeem (off-market)
 - **Risk**: Redemption fee may be high if held < 7 days
 
 ## Data Source
 
-All market data is fetched from [EastMoney (东方财富)](https://fund.eastmoney.com/) public APIs:
+All market data is fetched from [EastMoney](https://fund.eastmoney.com/) public APIs:
 - Fund list: `fund.eastmoney.com/js/fundcode_search.js`
 - Real-time quotes: `push2.eastmoney.com/api/qt/ulist.np/get`
 - iNAV estimates: `fundgz.1234567.com.cn/js/{code}.js`
@@ -132,3 +141,114 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Disclaimer
 
 This tool is for educational and informational purposes only. It does not constitute investment advice. Use at your own risk.
+
+---
+
+<a id="中文"></a>
+
+## LOF套利雷达
+
+实时监控 LOF 基金溢价/折价套利机会的 Web 应用，支持自动数据刷新、历史趋势分析、多渠道告警推送。
+
+## 功能特性
+
+- **实时监控** - 全市场 LOF 基金扫描（股票型/混合型/商品型/QDII型）
+- **溢价套利** - 自动计算扣费后净收益，推荐高溢价套利机会
+- **折价套利** - 监控折价机会，提供折价套利建议
+- **QDII专区** - 独立展示 QDII 型 LOF，重点关注高溢价品种
+- **净值走势图** - 支持 1月/3月/6月/1年/全部 周期切换（Chart.js）
+- **智能告警** - 净溢价 >= 3% 时自动推送企业微信 + 邮件通知
+- **用户系统** - 注册、登录、角色权限控制（管理员/VIP/普通用户）
+- **管理后台** - 用户管理、系统配置、操作审计日志
+- **响应式设计** - 支持PC和手机访问
+- **自动刷新** - 交易时间每5分钟自动更新数据
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 后端 | Python 3 + Flask |
+| 前端 | 原生 JS + Chart.js |
+| 数据库 | SQLite |
+| 进程管理 | Supervisor |
+| 反向代理 | Nginx |
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.8+
+- pip
+
+### 安装
+
+```bash
+git clone https://github.com/bobycade/LOF-Arbitrage-Radar.git
+cd LOF-Arbitrage-Radar
+pip install -r requirements.txt
+cp .env.example .env
+# 编辑 .env 填入实际配置
+python app.py
+```
+
+浏览器打开 `http://localhost:5000` 即可访问。
+
+### 生产部署
+
+```bash
+chmod +x quickstart.sh
+bash quickstart.sh
+```
+
+完整部署指南请参考 [DEPLOY.md](DEPLOY.md)。
+
+## 配置说明
+
+复制 `.env.example` 为 `.env` 并按需配置：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SERVER_HOST` | `0.0.0.0` | 服务绑定地址 |
+| `SERVER_PORT` | `5000` | 服务端口 |
+| `SECRET_KEY` | - | Flask 会话密钥（务必修改！） |
+| `WECHAT_WEBHOOK` | - | 企业微信群机器人 Webhook 地址 |
+| `SMTP_SERVER` | `smtp.qq.com` | SMTP 服务器 |
+| `SMTP_USER` | - | SMTP 用户名 |
+| `SMTP_PASSWORD` | - | SMTP 授权码（不是邮箱密码！） |
+| `ALERT_THRESHOLD` | `3.0` | 告警阈值（%） |
+| `SHOW_THRESHOLD` | `1.5` | 显示阈值（%） |
+| `REFRESH_INTERVAL` | `5` | 数据刷新间隔（分钟） |
+
+## 套利策略
+
+### 溢价套利
+- **触发条件**：净溢价 >= 3%
+- **操作流程**：场外申购 → 转托管到场内 → 场内卖出
+- **风险提示**：T+2 交收期内净值可能下跌，溢价可能消失
+- **特别注意**：暂停申购的基金无法操作
+
+### 折价套利
+- **触发条件**：净折价 >= 3%
+- **操作流程**：场内买入 → 转托管到场外 → 场外赎回
+- **风险提示**：赎回价不确定，持有 <7 天赎回费较高
+- **特别注意**：赎回到账需 3-4 个交易日
+
+## 数据来源
+
+所有行情数据来自 [东方财富](https://fund.eastmoney.com/) 公开 API：
+- 基金列表：`fund.eastmoney.com/js/fundcode_search.js`
+- 实时行情：`push2.eastmoney.com/api/qt/ulist.np/get`
+- 实时估值：`fundgz.1234567.com.cn/js/{code}.js`
+- 历史净值：`api.fund.eastmoney.com/f10/lsjz`
+
+## 参与贡献
+
+欢迎提交 Pull Request 参与贡献！
+
+## 许可证
+
+本项目基于 MIT 许可证开源，详见 [LICENSE](LICENSE) 文件。
+
+## 免责声明
+
+本工具仅供学习和参考使用，不构成任何投资建议。使用风险自负。
