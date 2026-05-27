@@ -164,12 +164,20 @@ class DatabaseManager:
         conn.close()
 
     def insert_data(self, fund_data_list):
-        """批量插入数据（同一天同基金只保留最新一条）"""
+        """批量插入数据（覆盖当天旧数据，保证同一刷新批次 timestamp 一致）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             inserted = 0
+
+            # 先获取本次刷新的数据日期
+            data_date = fund_data_list[0].get('data_date', '') if fund_data_list else ''
+
+            # 删除当天旧数据，避免历史记录无限增长
+            if data_date:
+                cursor.execute('DELETE FROM premium_history WHERE data_date = ?', (data_date,))
+                logger.info(f"清除 {data_date} 旧数据 {cursor.rowcount} 条")
 
             for fund in fund_data_list:
                 try:
@@ -255,7 +263,7 @@ class DatabaseManager:
                        purchase_status, purchase_limit, redemption_status as redeem_status,
                        data_date, nav_change_pct
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type != 'QDII'
                 AND net_premium_return >= 1.5
                 ORDER BY net_premium_return DESC
@@ -286,7 +294,7 @@ class DatabaseManager:
                        purchase_status, purchase_limit, redemption_status as redeem_status,
                        data_date, nav_change_pct
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type != 'QDII'
             '''
             params = []
@@ -319,7 +327,7 @@ class DatabaseManager:
                        purchase_status, purchase_limit, redemption_status as redeem_status,
                        data_date, nav_change_pct
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type != 'QDII'
                 AND net_discount_return >= 1.5
                 ORDER BY net_discount_return DESC
@@ -348,7 +356,7 @@ class DatabaseManager:
                        purchase_status, purchase_limit, redemption_status as redeem_status,
                        data_date, nav_change_pct
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type != 'QDII'
                 AND discount_rate > 0
                 ORDER BY net_discount_return DESC
@@ -379,7 +387,7 @@ class DatabaseManager:
                        purchase_status, purchase_limit, redemption_status as redeem_status,
                        data_date, nav_change_pct
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type = 'QDII'
             '''
             params = []
@@ -423,7 +431,7 @@ class DatabaseManager:
             return []
 
     def get_all_funds(self):
-        """获取所有基金最新数据（字段名与前端统一）"""
+        """获取所有基金最新数据（按fund_code取最新一条，不依赖timestamp）"""
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -440,7 +448,7 @@ class DatabaseManager:
                        redemption_status AS redeem_status,
                        nav_change_pct, data_date, timestamp
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
             ''')
             rows = cursor.fetchall()
             conn.close()
@@ -458,7 +466,7 @@ class DatabaseManager:
             sql = '''
                 SELECT fund_type, COUNT(*) as cnt
                 FROM premium_history
-                WHERE timestamp = (SELECT MAX(timestamp) FROM premium_history)
+                WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code)
                 AND fund_type IS NOT NULL AND fund_type != ''
             '''
             if not include_qdii:
