@@ -9,6 +9,7 @@ import requests
 import json
 import re
 import time
+import random
 import logging
 from datetime import datetime
 
@@ -24,9 +25,44 @@ class DataFetcher:
         })
         self._lof_cache = None
         self._lof_cache_time = None
+        # 频率控制：自适应延迟（遇到429自动降速）
+        self._base_delay_nav = 0.5       # NAV请求基础间隔
+        self._base_delay_inav = 0.5      # iNAV请求基础间隔
+        self._base_delay_batch = 1.0     # 批量价格请求基础间隔
+        self._error_count = 0            # 连续错误计数
+        self._request_count = 0          # 请求计数（每轮重置）
+
+    def _safe_request(self, method, url, **kwargs):
+        """带429检测和自动降速的安全请求方法"""
+        resp = self.session.request(method, url, **kwargs)
+        if resp.status_code == 429:
+            self._error_count += 1
+            # 指数退避：1s, 2s, 4s, 8s, 最大16s
+            backoff = min(2 ** self._error_count, 16)
+            wait = backoff + random.uniform(0.5, 2.0)
+            logger.warning(f"收到429限流，等待{wait:.1f}秒后重试 (连续错误{self._error_count}次)")
+            time.sleep(wait)
+            resp = self.session.request(method, url, **kwargs)
+            if resp.status_code == 429:
+                logger.error(f"重试后仍429，跳过 (URL: {url[:80]})")
+            else:
+                self._error_count = 0  # 重试成功，重置错误计数
+        elif resp.status_code == 403:
+            self._error_count += 1
+            logger.error(f"收到403，IP可能被封禁 (URL: {url[:80]})")
+        else:
+            # 成功请求，逐步恢复基础延迟
+            if self._error_count > 0:
+                self._error_count = max(0, self._error_count - 1)
+        self._request_count += 1
+        return resp
+
+    def _jitter(self, base):
+        """加随机抖动，避免固定频率被识别"""
+        return base + random.uniform(-0.1, 0.2)
 
     def get_all_lof_list(self):
-        """获取全部LOF基金列表"""
+        """获取全部LOF基金列表（通过基金名称中的(LOF)标识筛选）"""
         if self._lof_cache and (datetime.now() - self._lof_cache_time).seconds < 3600:
             return self._lof_cache
         try:
@@ -37,10 +73,12 @@ class DataFetcher:
             all_funds = json.loads(match.group(1))
             lof_list = []
             for item in all_funds:
-                code = str(item[0])
-                if not (code.startswith('16') or code.startswith('501')):
+                name_raw = str(item[2])
+                # 通过名称中的(LOF)标识筛选，覆盖所有代码前缀（16/501/502/00等）
+                if '(LOF)' not in name_raw.upper():
                     continue
-                name = item[2].replace('(LOF)', '').replace('(后端)', '')
+                code = str(item[0])
+                name = name_raw.replace('(LOF)', '').replace('(lof)', '').replace('(后端)', '')
                 ftype = item[3] if len(item) > 3 else ''
                 cat = self._classify(ftype, name)
                 if cat:
@@ -80,15 +118,15 @@ class DataFetcher:
             secids_str = ','.join(secids)
             url = f'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f3,f4,f5,f6,f12,f14,f15,f16,f17&secids={secids_str}'
             try:
-                resp = self.session.get(url, timeout=15)
+                resp = self._safe_request('GET', url, timeout=15)
+                if resp.status_code == 429 or resp.status_code == 403:
+                    continue
                 data = resp.json()
                 if data.get('data') and data['data'].get('diff'):
                     for item in data['data']['diff']:
                         code = item.get('f12', '')
                         price = item.get('f2')
                         if price and float(price) > 0:
-                            # f2=最新价, f3=涨跌幅%, f4=涨跌额, f5=成交量, f6=成交额
-                            # f16=最高, f17=最低
                             prices[code] = {
                                 'price': float(price),
                                 'change_pct': float(item.get('f3', 0) or 0),
@@ -99,7 +137,8 @@ class DataFetcher:
                             }
             except Exception as e:
                 logger.error(f"批量价格获取失败(batch {i}): {e}")
-            time.sleep(0.3)
+            if i + batch_size < len(fund_codes):
+                time.sleep(self._jitter(self._base_delay_batch))
         return prices
 
     def get_fund_nav_info(self, fund_code):
@@ -109,7 +148,9 @@ class DataFetcher:
         try:
             url = f'https://api.fund.eastmoney.com/f10/lsjz?fundCode={fund_code}&pageIndex=1&pageSize=1'
             headers = {'Referer': 'https://fundf10.eastmoney.com/'}
-            resp = self.session.get(url, headers=headers, timeout=10)
+            resp = self._safe_request('GET', url, headers=headers, timeout=10)
+            if resp.status_code == 429 or resp.status_code == 403:
+                return None
             data = resp.json()
             if data.get('Data') and data['Data'].get('LSJZList'):
                 item = data['Data']['LSJZList'][0]
@@ -132,7 +173,9 @@ class DataFetcher:
         返回: dict with inav, inav_date, inav_time, is_inav=True
         """
         try:
-            resp = self.session.get(f'http://fundgz.1234567.com.cn/js/{fund_code}.js', timeout=10)
+            resp = self._safe_request('GET', f'http://fundgz.1234567.com.cn/js/{fund_code}.js', timeout=10)
+            if resp.status_code == 429 or resp.status_code == 403:
+                return None
             text = resp.text
             match = re.search(r'"gsz":"([\d.]+)"', text)
             if match:
@@ -169,6 +212,8 @@ class DataFetcher:
 
         results = []
         start_time = time.time()
+        self._request_count = 0  # 每轮重置请求计数
+        logger.info(f"开始采集 {len(fund_list)} 只基金 (NAV间隔={self._base_delay_nav}s, iNAV间隔={self._base_delay_inav}s, 批量间隔={self._base_delay_batch}s)")
 
         # Step 1: 批量获取场内价格
         codes = [f['code'] for f in fund_list]
@@ -186,7 +231,7 @@ class DataFetcher:
                 nav_info_map[code] = info
             if (i + 1) % 50 == 0:
                 logger.info(f"NAV进度: {i + 1}/{len(codes)}")
-            time.sleep(0.08)
+            time.sleep(self._jitter(self._base_delay_nav))
 
         logger.info(f"获取到 {len(nav_info_map)} 只NAV信息")
 
@@ -205,7 +250,7 @@ class DataFetcher:
                     inav_map[code] = inav
                 if (i + 1) % 50 == 0:
                     logger.info(f"iNAV进度: {i + 1}/{len(codes)}")
-                time.sleep(0.05)
+                time.sleep(self._jitter(self._base_delay_inav))
             logger.info(f"获取到 {len(inav_map)} 只iNAV")
 
         # Step 4: 合并数据

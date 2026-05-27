@@ -914,6 +914,8 @@ document.addEventListener('DOMContentLoaded', function() {
 let fdCurrentFund = null;   // 当前详情基金数据
 let fdNavChart = null;      // Chart.js 实例
 let fdAllNavData = [];      // 全量历史净值（用于切换周期）
+let fdNavTotalCount = 0;    // 净值总条数
+let fdNavPageCount = 0;     // 当前已显示条数
 let fdCurrentPeriod = '1m'; // 当前周期
 
 /**
@@ -1001,10 +1003,12 @@ function _fdReset(code) {
         '<tr><td colspan="4" style="text-align:center;color:#999;">加载中...</td></tr>';
     document.getElementById('fdChartLoading').classList.remove('hidden');
     fdAllNavData = [];
-    fdCurrentPeriod = '1m';
-    // 重置图表周期按钮
+    fdNavTotalCount = 0;
+    fdNavPageCount = 0;
+    fdCurrentPeriod = 'ytd';
+    // 重置图表周期按钮（默认"今年"为active）
     document.querySelectorAll('.fd-chart-tab').forEach((btn, i) => {
-        btn.classList.toggle('active', i === 0);
+        btn.classList.toggle('active', btn.textContent === '今年');
     });
     // 销毁旧 Chart
     if (fdNavChart) { fdNavChart.destroy(); fdNavChart = null; }
@@ -1056,21 +1060,27 @@ async function _fdFetchAllDetail(code) {
         console.warn('[基金详情] 详情加载失败:', e);
     }
 
-    // 加载历史净值（通过后端代理）
-    _fdFetchNavHistory(code, 120);
+    // 加载历史净值（通过后端代理，全量加载）
+    _fdFetchNavHistory(code);
 }
 
-/** 拉取历史净值并渲染图表 + 表格（通过后端代理） */
-async function _fdFetchNavHistory(code, pageSize = 120) {
+/** 全量加载历史净值并渲染图表 + 表格（后端 pingzhongdata 代理，一次返回全部数据） */
+async function _fdFetchNavHistory(code) {
     document.getElementById('fdChartLoading').classList.remove('hidden');
+    document.getElementById('fdNavTableBody').innerHTML =
+        '<tr><td colspan="4" style="text-align:center;color:#999;">加载中...</td></tr>';
     try {
-        const url = `/api/fund/nav_history?code=${encodeURIComponent(code)}&pageSize=${pageSize}`;
+        const url = `/api/fund/nav_history?code=${encodeURIComponent(code)}`;
         const res = await fetch(url);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status}: ${errText}`);
+        }
         const json = await res.json();
         if (!json.success || !json.data) {
             throw new Error(json.error || '接口返回异常');
         }
+
         const list = json.data.LSJZList || [];
         if (!list.length) {
             document.getElementById('fdNavTableBody').innerHTML =
@@ -1079,37 +1089,97 @@ async function _fdFetchNavHistory(code, pageSize = 120) {
             return;
         }
 
-        // 倒序（最早在前）用于图表，正序（最新在前）用于表格
-        fdAllNavData = [...list].reverse();
+        // 存储全量数据（后端已按最新在前排列）
+        fdAllNavData = list;
+        fdNavTotalCount = json.totalCount || list.length;
 
-        // 渲染历史净值表（正序，最新在前）
-        _fdRenderNavTable(list);
+        // 渲染历史净值表（分页，初始显示20条）
+        fdNavPageCount = 0;
+        _fdRenderNavTable();
 
-        // 绘图（默认1月）
-        _fdDrawChart('1m');
+        // 绘图（使用当前选中的周期，默认今年）
+        _fdDrawChart(fdCurrentPeriod);
+
+        // 更新表格标题显示总条数
+        const navTitleEl = document.getElementById('fdNavTitle');
+        if (navTitleEl) {
+            navTitleEl.innerHTML = '📅 历史净值 <span style="font-weight:400;font-size:12px;color:#999;">共 ' + fdNavTotalCount + ' 条</span>';
+        }
 
     } catch (e) {
-        console.warn('[基金详情] 历史净值加载失败:', e);
+        console.error('[基金详情] 历史净值加载失败:', e);
+        const errMsg = e && e.message ? e.message : '未知错误';
         document.getElementById('fdNavTableBody').innerHTML =
-            '<tr><td colspan="4" style="text-align:center;color:#f44336;">净值数据加载失败</td></tr>';
+            `<tr><td colspan="4" style="text-align:center;color:#f44336;padding:16px 0;">
+                <div>净值数据加载失败</div>
+                <div style="font-size:12px;color:#999;margin-top:4px;">${errMsg}</div>
+            </td></tr>`;
         document.getElementById('fdChartLoading').classList.add('hidden');
     }
 }
 
-/** 渲染历史净值表格（只显示最近30条） */
-function _fdRenderNavTable(list) {
-    const show = list.slice(0, 30);
-    document.getElementById('fdNavTableBody').innerHTML = show.map(row => {
-        const dv = parseFloat(row.JZZZL);
-        const dvClass = isNaN(dv) ? '' : (dv > 0 ? 'style="color:#f44336;font-weight:600"' : dv < 0 ? 'style="color:#4caf50;font-weight:600"' : '');
-        const dvText = isNaN(dv) ? '-' : (dv > 0 ? '+' : '') + dv.toFixed(2) + '%';
-        return `<tr>
-            <td>${row.FSRQ || '-'}</td>
-            <td>${row.DWJZ || '-'}</td>
-            <td>${row.LJJZ || '-'}</td>
-            <td ${dvClass}>${dvText}</td>
-        </tr>`;
-    }).join('');
+/** 渲染历史净值表格（分页加载，每次追加20条） */
+function _fdRenderNavTable() {
+    const pageSize = 20;
+    const start = fdNavPageCount;
+    const end = Math.min(start + pageSize, fdAllNavData.length);
+    const newItems = fdAllNavData.slice(start, end);
+
+    if (start === 0) {
+        // 首次渲染
+        const rows = newItems.map(row => _fdBuildNavRow(row)).join('');
+        document.getElementById('fdNavTableBody').innerHTML = rows || '<tr><td colspan="4" style="text-align:center;color:#999;">暂无净值数据</td></tr>';
+    } else {
+        // 追加渲染
+        const tbody = document.getElementById('fdNavTableBody');
+        // 移除旧的"加载更多"行
+        const loadMoreRow = tbody.querySelector('.fd-load-more-row');
+        if (loadMoreRow) loadMoreRow.remove();
+        tbody.insertAdjacentHTML('beforeend', newItems.map(row => _fdBuildNavRow(row)).join(''));
+    }
+    fdNavPageCount = end;
+
+    // 判断是否需要"加载更多"按钮
+    _fdUpdateLoadMoreBtn();
+}
+
+/** 构建单行历史净值表格HTML */
+function _fdBuildNavRow(row) {
+    const dv = parseFloat(row.JZZZL);
+    const dvClass = isNaN(dv) ? '' : (dv > 0 ? 'style="color:#f44336;font-weight:600"' : dv < 0 ? 'style="color:#4caf50;font-weight:600"' : '');
+    const dvText = isNaN(dv) ? '-' : (dv > 0 ? '+' : '') + dv.toFixed(2) + '%';
+    return `<tr>
+        <td>${row.FSRQ || '-'}</td>
+        <td>${row.DWJZ || '-'}</td>
+        <td>${row.LJJZ || '-'}</td>
+        <td ${dvClass}>${dvText}</td>
+    </tr>`;
+}
+
+/** 更新"加载更多"按钮状态 */
+function _fdUpdateLoadMoreBtn() {
+    const tbody = document.getElementById('fdNavTableBody');
+    // 移除旧按钮
+    const old = tbody.querySelector('.fd-load-more-row');
+    if (old) old.remove();
+
+    if (fdNavPageCount < fdAllNavData.length) {
+        const remaining = fdAllNavData.length - fdNavPageCount;
+        const showCount = Math.min(20, remaining);
+        const tr = document.createElement('tr');
+        tr.className = 'fd-load-more-row';
+        tr.innerHTML = `<td colspan="4" style="text-align:center;padding:8px;">
+            <button class="fd-load-more-btn" onclick="_fdLoadMoreNav()">
+                加载更多（还有 ${remaining} 条，本次加载 ${showCount} 条）
+            </button>
+        </td>`;
+        tbody.appendChild(tr);
+    }
+}
+
+/** 加载更多历史净值 */
+function _fdLoadMoreNav() {
+    _fdRenderNavTable();
 }
 
 /** 根据周期切换图表数据 */
@@ -1120,7 +1190,7 @@ function switchChartPeriod(period, btn) {
     _fdDrawChart(period);
 }
 
-/** 绘制净值折线图 */
+/** 绘制净值折线图（支持累计净值双线） */
 function _fdDrawChart(period) {
     if (!fdAllNavData.length) return;
     if (typeof Chart === 'undefined') {
@@ -1130,20 +1200,47 @@ function _fdDrawChart(period) {
     }
     document.getElementById('fdChartLoading').classList.add('hidden');
 
+    // 数据需要倒序（最早的在前）用于图表
+    const allDataReversed = [...fdAllNavData].reverse();
+
     // 根据周期过滤数据
     const now = new Date();
-    const cutoffs = { '1m': 30, '3m': 90, '6m': 180, '1y': 365, 'all': 99999 };
-    const days = cutoffs[period] || 30;
-    const cutDate = new Date(now - days * 86400000);
-
-    let filtered = fdAllNavData.filter(row => {
-        if (!row.FSRQ) return false;
-        return new Date(row.FSRQ) >= cutDate;
-    });
-    if (filtered.length === 0) filtered = fdAllNavData;
+    let filtered;
+    if (period === 'ytd') {
+        // 今年：从1月1日起
+        const yearStart = new Date(now.getFullYear(), 0, 1);
+        filtered = allDataReversed.filter(row => {
+            if (!row.FSRQ) return false;
+            return new Date(row.FSRQ) >= yearStart;
+        });
+    } else {
+        const cutoffs = { '1m': 30, '3m': 90, '6m': 180, '1y': 365, 'all': 99999 };
+        const days = cutoffs[period] || 30;
+        const cutDate = new Date(now - days * 86400000);
+        filtered = allDataReversed.filter(row => {
+            if (!row.FSRQ) return false;
+            return new Date(row.FSRQ) >= cutDate;
+        });
+    }
+    if (filtered.length === 0) filtered = allDataReversed;
 
     const labels = filtered.map(r => r.FSRQ);
     const navValues = filtered.map(r => parseFloat(r.DWJZ) || null);
+    const accNavValues = filtered.map(r => parseFloat(r.LJJZ) || null);
+
+    // 计算统计摘要
+    const validNav = navValues.filter(v => v !== null);
+    const stats = {
+        maxNav: validNav.length ? Math.max(...validNav) : null,
+        minNav: validNav.length ? Math.min(...validNav) : null,
+        latestNav: validNav.length ? validNav[validNav.length - 1] : null,
+        firstNav: validNav.length ? validNav[0] : null,
+    };
+    if (stats.firstNav && stats.latestNav) {
+        stats.totalReturn = ((stats.latestNav - stats.firstNav) / stats.firstNav * 100);
+    }
+    // 更新统计摘要显示
+    _fdUpdateChartStats(stats, period);
 
     const canvas = document.getElementById('fdNavChart');
     const isDark = document.body.classList.contains('dark-mode');
@@ -1152,31 +1249,82 @@ function _fdDrawChart(period) {
 
     if (fdNavChart) { fdNavChart.destroy(); fdNavChart = null; }
 
+    const datasets = [
+        {
+            label: '单位净值',
+            data: navValues,
+            borderColor: '#667eea',
+            backgroundColor: 'rgba(102,126,234,0.08)',
+            borderWidth: 2,
+            pointRadius: filtered.length > 60 ? 0 : 2,
+            pointHoverRadius: 5,
+            fill: true,
+            tension: 0.3,
+        }
+    ];
+
+    // 累计净值线（仅当 LJJZ 与 DWJZ 有明显差异时才绘制）
+    const hasValidAccNav = accNavValues.some((v, i) =>
+        v !== null && v > 0 && Math.abs(v - (navValues[i] || 0)) > 0.001
+    );
+    if (hasValidAccNav) {
+        datasets.push({
+            label: '累计净值',
+            data: accNavValues,
+            borderColor: '#f0937b',
+            backgroundColor: 'rgba(240,147,123,0.05)',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            borderDash: [4, 2],
+            fill: false,
+            tension: 0.3,
+        });
+    }
+
     fdNavChart = new Chart(canvas, {
         type: 'line',
-        data: {
-            labels,
-            datasets: [{
-                label: '单位净值',
-                data: navValues,
-                borderColor: '#667eea',
-                backgroundColor: 'rgba(102,126,234,0.08)',
-                borderWidth: 2,
-                pointRadius: filtered.length > 60 ? 0 : 3,
-                pointHoverRadius: 5,
-                fill: true,
-                tension: 0.3,
-            }]
-        },
+        data: { labels, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { intersect: false, mode: 'index' },
             plugins: {
-                legend: { display: false },
+                legend: {
+                    display: hasValidAccNav,
+                    position: 'top',
+                    labels: {
+                        color: textColor,
+                        font: { size: 11 },
+                        boxWidth: 16,
+                        boxHeight: 2,
+                        padding: 12,
+                    }
+                },
                 tooltip: {
+                    backgroundColor: isDark ? 'rgba(30,30,46,0.95)' : 'rgba(255,255,255,0.96)',
+                    titleColor: isDark ? '#ddd' : '#333',
+                    bodyColor: isDark ? '#bbb' : '#555',
+                    borderColor: isDark ? '#333' : '#eee',
+                    borderWidth: 1,
+                    padding: 10,
+                    cornerRadius: 6,
+                    titleFont: { size: 12, weight: '600' },
+                    bodyFont: { size: 12 },
                     callbacks: {
-                        label: ctx => '净值: ' + (ctx.parsed.y !== null ? ctx.parsed.y.toFixed(4) : '-')
+                        label: ctx => {
+                            const val = ctx.parsed.y;
+                            if (val === null) return ctx.dataset.label + ': -';
+                            return ctx.dataset.label + ': ' + val.toFixed(4);
+                        },
+                        afterBody: items => {
+                            // 如果有两条线，计算差值
+                            if (items.length >= 2 && items[0].parsed.y !== null && items[1].parsed.y !== null) {
+                                const diff = items[0].parsed.y - items[1].parsed.y;
+                                return ['', '差额: ' + (diff >= 0 ? '+' : '') + diff.toFixed(4)];
+                            }
+                            return [];
+                        }
                     }
                 }
             },
@@ -1201,6 +1349,38 @@ function _fdDrawChart(period) {
             }
         }
     });
+}
+
+/** 更新图表下方的统计摘要 */
+function _fdUpdateChartStats(stats, period) {
+    const el = document.getElementById('fdChartStats');
+    if (!el) return;
+    if (!stats.latestNav) {
+        el.innerHTML = '';
+        return;
+    }
+    const periodLabels = { '1m': '近1月', '3m': '近3月', '6m': '近6月', '1y': '近1年', 'ytd': '今年', 'all': '成立以来' };
+    const periodLabel = periodLabels[period] || '';
+
+    let html = `<div class="fd-chart-stats">
+        <div class="fd-stat-item">
+            <span class="fd-stat-label">区间最高</span>
+            <span class="fd-stat-value" style="color:#f44336;">${stats.maxNav !== null ? stats.maxNav.toFixed(4) : '-'}</span>
+        </div>
+        <div class="fd-stat-item">
+            <span class="fd-stat-label">区间最低</span>
+            <span class="fd-stat-value" style="color:#4caf50;">${stats.minNav !== null ? stats.minNav.toFixed(4) : '-'}</span>
+        </div>
+        <div class="fd-stat-item">
+            <span class="fd-stat-label">${periodLabel}涨幅</span>
+            <span class="fd-stat-value" style="color:${stats.totalReturn >= 0 ? '#f44336' : '#4caf50'};">${stats.totalReturn !== undefined ? (stats.totalReturn >= 0 ? '+' : '') + stats.totalReturn.toFixed(2) + '%' : '-'}</span>
+        </div>
+        <div class="fd-stat-item">
+            <span class="fd-stat-label">最新净值</span>
+            <span class="fd-stat-value">${stats.latestNav.toFixed(4)}</span>
+        </div>
+    </div>`;
+    el.innerHTML = html;
 }
 
 /** 从详情页打开计算器 */

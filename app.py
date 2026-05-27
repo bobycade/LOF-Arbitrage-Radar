@@ -10,7 +10,10 @@ LOF套利雷达 - Flask后端应用 v5.0
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, g
 import logging
 import os
+import re
+import json as _json
 import requests as http_requests
+import time as _time
 from datetime import datetime, timedelta
 from data_fetcher import DataFetcher
 from arbitrage_calculator import ArbitrageCalculator
@@ -58,7 +61,7 @@ notifier = Notifier(wechat_webhook, mail_config)
 alerted_funds = set()
 
 # 全局数据刷新状态
-refresh_status = {'last_refresh': None, 'refreshing': False, 'count': 0, 'nav_date': ''}
+refresh_status = {'last_refresh': None, 'refreshing': False, 'count': 0, 'nav_date': '', 'last_done': None}
 
 
 @app.route('/')
@@ -350,7 +353,7 @@ def api_remove_favorite(fund_code):
 
 @app.route('/api/refresh', methods=['POST'])
 def refresh_data():
-    """手动/定时刷新数据"""
+    """手动/定时刷新数据（1分钟冷却限制，防止频繁请求东方财富API）"""
     global refresh_status
 
     if refresh_status.get('refreshing', False):
@@ -359,6 +362,16 @@ def refresh_data():
             'error': '正在刷新中，请稍后重试',
             'refreshing': True
         })
+
+    # 冷却限制：距离上次刷新完成不足60秒则拒绝
+    last_done = refresh_status.get('last_done')
+    if last_done:
+        elapsed = (datetime.now() - last_done).total_seconds()
+        if elapsed < 60:
+            return jsonify({
+                'success': False,
+                'error': f'刷新过于频繁，请{int(60 - elapsed)}秒后重试'
+            }), 429
 
     try:
         refresh_status['refreshing'] = True
@@ -369,6 +382,7 @@ def refresh_data():
         if not lof_list:
             logger.error("LOF列表为空")
             refresh_status['refreshing'] = False
+            refresh_status['last_done'] = datetime.now()
             return jsonify({'success': False, 'error': '获取LOF列表失败，请稍后重试'})
 
         # 获取实时数据
@@ -376,6 +390,7 @@ def refresh_data():
         if not fund_data_list:
             logger.error("无有效数据")
             refresh_status['refreshing'] = False
+            refresh_status['last_done'] = datetime.now()
             return jsonify({'success': False, 'error': '未获取到有效数据，可能非交易时间或接口异常'})
 
         # 计算套利
@@ -394,6 +409,7 @@ def refresh_data():
         refresh_status['count'] = len(fund_data_list)
         refresh_status['nav_date'] = nav_date
         refresh_status['refreshing'] = False
+        refresh_status['last_done'] = datetime.now()
 
         logger.info(f"数据刷新完成，共 {len(fund_data_list)} 只基金，净值日期 {nav_date}")
 
@@ -407,6 +423,7 @@ def refresh_data():
     except Exception as e:
         logger.error(f"刷新数据失败: {e}")
         refresh_status['refreshing'] = False
+        refresh_status['last_done'] = datetime.now()
         return jsonify({
             'success': False,
             'error': str(e)
@@ -712,6 +729,8 @@ def api_fund_detail():
     except Exception as e:
         logger.warning(f'基金详情-基本信息失败 {code}: {e}')
 
+    _time.sleep(0.3)  # 请求间隔，避免触发东方财富频率限制
+
     # 2) 近期业绩
     try:
         url2 = f'{api_base}/FundMNPeriodIncrease?{params.format(code)}'
@@ -728,6 +747,8 @@ def api_fund_detail():
         result['performance'] = perf
     except Exception as e:
         logger.warning(f'基金详情-业绩数据失败 {code}: {e}')
+
+    _time.sleep(0.3)  # 请求间隔，避免触发东方财富频率限制
 
     # 3) 基金经理
     try:
@@ -748,31 +769,72 @@ def api_fund_detail():
 
 @app.route('/api/fund/nav_history')
 def api_fund_nav_history():
-    """代理获取历史净值（解决 JSONP 跨域问题）"""
+    """代理获取历史净值 — 使用 pingzhongdata 接口（f10/lsjz 已被封禁）"""
     code = request.args.get('code', '').strip()
     if not code:
         return jsonify({'success': False, 'error': '缺少基金代码'}), 400
 
-    page = int(request.args.get('page', 1))
-    page_size = int(request.args.get('pageSize', 120))
-
     try:
-        url = f'https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize={page_size}'
+        url = f'https://fund.eastmoney.com/pingzhongdata/{code}.js'
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://fund.eastmoney.com/',
         }
-        r = http_requests.get(url, headers=headers, timeout=10)
+        r = http_requests.get(url, headers=headers, timeout=30)
         r.raise_for_status()
-        data = r.json()
+        text = r.text
+
+        if 'Data_netWorthTrend' not in text:
+            logger.warning(f'基金历史净值数据为空 {code}')
+            return jsonify({'success': True, 'data': {'LSJZList': []}, 'totalCount': 0})
+
+        # 解析 JS 变量 Data_netWorthTrend（格式：[{x: 时间戳ms, y: 单位净值, equityReturn: 日涨跌%}, ...]）
+        match = re.search(r'Data_netWorthTrend\s*=\s*(\[[\s\S]*?\]);', text)
+        if not match:
+            logger.warning(f'基金历史净值解析失败 {code}: 未找到 Data_netWorthTrend')
+            return jsonify({'success': False, 'error': '无法解析净值数据'}), 502
+
+        raw = _json.loads(match.group(1))
+        if not raw or not isinstance(raw, list) or len(raw) == 0:
+            return jsonify({'success': True, 'data': {'LSJZList': []}, 'totalCount': 0})
+
+        # 转换为兼容前端的 LSJZList 格式（FSRQ / DWJZ / LJJZ / JZZZL）
+        lsjz_list = []
+        for item in raw:
+            ts = item.get('x', 0)
+            nav = item.get('y', 0)
+            er = item.get('equityReturn', 0)
+            try:
+                date_str = datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d')
+            except (OSError, ValueError):
+                continue
+            lsjz_list.append({
+                'FSRQ': date_str,
+                'DWJZ': str(nav),
+                'LJJZ': str(nav),       # pingzhongdata 不提供累计净值
+                'JZZZL': str(er),       # 日涨跌幅（%）
+            })
+
+        # 按最新在前排列（与原 f10/lsjz 行为一致）
+        lsjz_list.reverse()
+
         return jsonify({
             'success': True,
-            'data': data.get('Data', {}),
-            'totalCount': data.get('TotalCount', 0),
+            'data': {'LSJZList': lsjz_list},
+            'totalCount': len(lsjz_list),
         })
+    except http_requests.exceptions.Timeout:
+        logger.warning(f'基金历史净值请求超时 {code}')
+        return jsonify({'success': False, 'error': '请求数据源超时，请稍后重试'}), 504
+    except http_requests.exceptions.HTTPError as e:
+        logger.error(f'基金历史净值 HTTP 错误 {code}: {e}')
+        return jsonify({'success': False, 'error': f'数据源服务异常 (HTTP {getattr(r, "status_code", "?")})'}), 502
     except Exception as e:
-        logger.warning(f'基金历史净值获取失败 {code}: {e}')
+        logger.error(f'基金历史净值获取失败 {code}: {e}')
         return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as e:
+        logger.error(f'基金历史净值获取失败 {code}: {e}')
+        return jsonify({'success': False, 'error': f'获取失败: {str(e)}'}), 500
 
 
 # ==================== 管理后台路由 (v5.0) ====================

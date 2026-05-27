@@ -422,22 +422,24 @@
             <div class="fd-section-title">
                 📉 净值走势
                 <div class="fd-chart-tabs">
-                    <button class="fd-chart-tab active" onclick="switchChartPeriod('1m', this)">1月</button>
+                    <button class="fd-chart-tab" onclick="switchChartPeriod('1m', this)">1月</button>
                     <button class="fd-chart-tab" onclick="switchChartPeriod('3m', this)">3月</button>
                     <button class="fd-chart-tab" onclick="switchChartPeriod('6m', this)">6月</button>
+                    <button class="fd-chart-tab active" onclick="switchChartPeriod('ytd', this)">今年</button>
                     <button class="fd-chart-tab" onclick="switchChartPeriod('1y', this)">1年</button>
                     <button class="fd-chart-tab" onclick="switchChartPeriod('all', this)">全部</button>
                 </div>
             </div>
-            <div class="fd-chart-container">
+            <div class="fd-chart-container" style="height:280px;">
                 <canvas id="fdNavChart"></canvas>
                 <div class="fd-chart-loading" id="fdChartLoading">加载中...</div>
             </div>
+            <div id="fdChartStats"></div>
         </div>
 
         <!-- 历史净值表 -->
         <div class="fd-section">
-            <div class="fd-section-title">📅 历史净值</div>
+            <div class="fd-section-title" id="fdNavTitle">📅 历史净值</div>
             <div class="fd-nav-table-wrap">
                 <table class="fd-nav-table">
                     <thead><tr><th>净值日期</th><th>单位净值</th><th>累计净值</th><th>日涨幅</th></tr></thead>
@@ -456,6 +458,6 @@
     <script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"
             onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'"></script>
 
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=5.15"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=5.18"></script>
 </body>
 </html>

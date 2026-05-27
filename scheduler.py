@@ -31,13 +31,16 @@ def refresh_data():
 
         response = requests.post(
             f"{server_url}/api/refresh",
-            timeout=120  # 2分钟超时
+            timeout=600  # 10分钟超时（频率控制后单次刷新耗时较长）
         )
 
         result = response.json()
 
         if result.get('success'):
             logger.info(f"定时刷新成功！更新了 {result.get('count', 0)} 只基金")
+            return True
+        elif response.status_code == 429:
+            logger.info(f"刷新被限流冷却中（{result.get('error', '')}），跳过本次")
             return True
         else:
             logger.error(f"定时刷新失败: {result.get('error')}")
