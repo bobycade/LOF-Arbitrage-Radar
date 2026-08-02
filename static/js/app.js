@@ -291,7 +291,7 @@ function renderTable(type) {
                 <td class="${parseFloat(d.premium_rate)>0?'profit-positive':'profit-negative'}">${d.premium_rate}%</td>
                 <td class="${parseFloat(d.discount_rate)>0?'profit-positive':'profit-negative'}">${d.discount_rate}%</td>
                 <td class="${pc}">${d.profit_after_fee}%${calcBtn}</td>
-                <td>${getStatusLabel(d.purchase_status)}</td>
+                <td>${getStatusLabel(d.purchase_status)}${_ggLink(d.code)}</td>
                 <td>${statusHtml}</td>
             </tr>`;
         }
@@ -305,7 +305,7 @@ function renderTable(type) {
             <td>${d.nav||'-'}</td>
             <td class="${pc}">${d.discount_rate}%</td>
             <td class="${pc}">${d.profit_after_fee}%${calcBtn}</td>
-            <td>${getStatusLabel(d.purchase_status)}</td>
+            <td>${getStatusLabel(d.purchase_status)}${_ggLink(d.code)}</td>
             <td>${statusHtml}</td>
         </tr>`;
     }).join('');
@@ -404,13 +404,19 @@ async function searchFund() {
                 <p><strong>类型:</strong> ${d.type||'-'} | <strong>净值日期:</strong> ${d.nav_date||'-'}</p>
                 <p><strong>场内价格:</strong> ${d.market_price||'-'} | <strong>参考净值:</strong> ${d.nav||'-'}</p>
                 <p><strong>溢价/折价率:</strong> <span class="${pc}">${rate}%</span> | <strong>扣费后收益:</strong> <span class="${pc}">${d.profit_after_fee}%</span></p>
-                <p><strong>申购:</strong> ${getStatusLabel(d.purchase_status)} | <strong>赎回:</strong> ${isUnk?`<span class="unknown-price" onclick="showRiskWarning('${d.code}','${esc(d.name)}')">赎回价未知</span>`:getStatusLabel(d.redeem_status)}</p>
+                <p><strong>申购:</strong> ${getStatusLabel(d.purchase_status)}${_ggLink(d.code)} | <strong>赎回:</strong> ${isUnk?`<span class="unknown-price" onclick="showRiskWarning('${d.code}','${esc(d.name)}')">赎回价未知</span>`:getStatusLabel(d.redeem_status)}</p>
             </div>`;
         }).join('');
     } catch (e) { rd.innerHTML = `<p style="text-align:center;color:#f44336;">搜索失败: ${e.message}</p>`; }
 }
 
 // ========== 状态标签 ==========
+/** 生成基金公告链接（申购/赎回状态原始出处） */
+function _ggLink(code) {
+    if (!code) return '';
+    return `<a class="gg-link" href="https://fundf10.eastmoney.com/jjgg_${code}.html" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="查看基金公告（申购/赎回状态原始出处）">↗</a>`;
+}
+
 function getStatusLabel(status) {
     if (!status) return '-';
     if (status.includes('开放')) return `<span class="status-open">${status}</span>`;
@@ -960,9 +966,11 @@ function openFundDetail(code, rowData) {
             profEl.style.color = profitVal > 0 ? '#f44336' : '#4caf50';
         }
 
-        // 申购/赎回状态
+        // 申购/赎回状态（附基金公告链接：暂停/恢复申购的原始出处）
+        const ggUrl = `https://fundf10.eastmoney.com/jjgg_${code}.html`;
         document.getElementById('fdStatus').innerHTML =
-            (rowData.purchase_status || '-') + ' / ' + (rowData.redeem_status || '-');
+            (rowData.purchase_status || '-') + ' / ' + (rowData.redeem_status || '-') +
+            `<a class="fd-gg-link" href="${ggUrl}" target="_blank" rel="noopener" title="查看基金公告（暂停/恢复申购原始出处）">公告↗</a>`;
 
         // 自选按钮状态
         const isFav = favorites.some(f => f.code === code);
@@ -1464,6 +1472,44 @@ renderTable = function(type) {
                 const data = currentData[type];
                 const rowData = data ? data.find(d => d.code === this.dataset.code) : null;
                 openFundDetail(this.dataset.code, rowData || { code: this.dataset.code, name: this.textContent });
+            };
+            nameCell.innerHTML = '';
+            nameCell.appendChild(span);
+        }
+    });
+};
+
+// ==========================================
+// 同样覆盖 renderFavorites：自选表格的基金名称也可点击打开详情
+// （renderFavorites 不走 renderTable，需要单独绑定）
+// ==========================================
+const _origRenderFavorites = renderFavorites;
+renderFavorites = function() {
+    _origRenderFavorites();
+    const tbody = document.getElementById('favoritesTableBody');
+    if (!tbody) return;
+    tbody.querySelectorAll('tr').forEach(tr => {
+        const tds = tr.querySelectorAll('td');
+        if (tds.length < 2) return;
+        // 第0列是"⭐ CODE"，提取6位数字代码
+        const codeText = tds[0].textContent.replace(/[^\d]/g, '');
+        if (!codeText || codeText.length < 6) return;
+        const code = codeText.substring(0, 6);
+
+        const nameCell = tds[1];
+        const name = nameCell.textContent.trim();
+        if (name && name !== '-') {
+            const span = document.createElement('span');
+            span.className = 'fund-code-link';
+            span.dataset.code = code;
+            span.textContent = name;
+            span.onclick = function() {
+                const rd = favorites.find(f => f.code === code);
+                // 自选数据可能只有合成 rate 字段，映射为 premium_rate 供详情弹窗展示
+                const rowData = rd
+                    ? { ...rd, premium_rate: (rd.premium_rate !== undefined && rd.premium_rate !== '-') ? rd.premium_rate : (rd.rate || '-') }
+                    : { code, name };
+                openFundDetail(code, rowData);
             };
             nameCell.innerHTML = '';
             nameCell.appendChild(span);

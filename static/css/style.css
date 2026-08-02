@@ -2359,6 +2359,34 @@ body.dark-mode .fd-stat-value { color: #ccc; }
 body.dark-mode .fd-load-more-btn { background: #28283a; color: #aaa; border-color: #3a3a4a; }
 body.dark-mode .fd-load-more-btn:hover { background: #333; color: #667eea; }
 
+/* 基金详情-公告链接 */
+.fd-gg-link {
+    font-size: 12px;
+    color: #999;
+    text-decoration: none;
+    margin-left: 8px;
+    font-weight: 400;
+    white-space: nowrap;
+}
+.fd-gg-link:hover {
+    color: #667eea;
+    text-decoration: underline;
+}
+body.dark-mode .fd-gg-link { color: #777; }
+body.dark-mode .fd-gg-link:hover { color: #8b9dff; }
+
+/* 主表格/卡片-申购状态旁公告链接（小上标样式，不抢眼） */
+.gg-link {
+    font-size: 11px;
+    color: #bbb;
+    text-decoration: none;
+    margin-left: 3px;
+    vertical-align: super;
+}
+.gg-link:hover { color: #667eea; text-decoration: underline; }
+body.dark-mode .gg-link { color: #666; }
+body.dark-mode .gg-link:hover { color: #8b9dff; }
+
 /* 响应式 */
 @media (max-width: 768px) {
     .fund-detail-drawer {

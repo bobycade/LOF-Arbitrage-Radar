@@ -7,6 +7,8 @@ LOF套利雷达 - 数据库管理模块 v5.0
 12. [v5.0] users表扩展字段(手机号/头像/备注)
 13. [v5.0] 数据库迁移机制(自动ALTER TABLE)
 14. [v5.0] 用户管理方法(CRUUD/角色/封禁/重置密码/软删除)
+15. [v6.0] premium_history 去重 + (fund_code, nav_date) 唯一索引，INSERT OR REPLACE 真正生效
+16. [v6.0] set_config 支持插入新 key；新增进程级单例 get_db()
 """
 import sqlite3
 from datetime import datetime, timedelta
@@ -16,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 logger = logging.getLogger(__name__)
 
 # 数据库版本号，用于迁移判断
-DB_VERSION = 5
+DB_VERSION = 6
 
 
 class DatabaseManager:
@@ -164,20 +166,13 @@ class DatabaseManager:
         conn.close()
 
     def insert_data(self, fund_data_list):
-        """批量插入数据（覆盖当天旧数据，保证同一刷新批次 timestamp 一致）"""
+        """批量插入数据（同一天同基金只保留最新一条（v6 起真正生效：
+        唯一索引 idx_unique_fund_navdate(fund_code, nav_date) 使 INSERT OR REPLACE 命中冲突覆盖旧行））"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             inserted = 0
-
-            # 先获取本次刷新的数据日期
-            data_date = fund_data_list[0].get('data_date', '') if fund_data_list else ''
-
-            # 删除当天旧数据，避免历史记录无限增长
-            if data_date:
-                cursor.execute('DELETE FROM premium_history WHERE data_date = ?', (data_date,))
-                logger.info(f"清除 {data_date} 旧数据 {cursor.rowcount} 条")
 
             for fund in fund_data_list:
                 try:
@@ -431,7 +426,7 @@ class DatabaseManager:
             return []
 
     def get_all_funds(self):
-        """获取所有基金最新数据（按fund_code取最新一条，不依赖timestamp）"""
+        """获取所有基金最新数据（字段名与前端统一）"""
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -775,6 +770,26 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"  迁移users表字段失败: {e}")
 
+        # v5→v6: premium_history 去重并建立唯一索引，使 INSERT OR REPLACE 真正生效（幂等，可重复执行）
+        try:
+            # 1) 先去重：同一天同基金只保留 id 最大（最新）的一条
+            cursor.execute('''
+                DELETE FROM premium_history
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM premium_history GROUP BY fund_code, nav_date
+                )
+            ''')
+            logger.info(f"  迁移: premium_history 历史数据去重，删除 {cursor.rowcount} 条重复记录")
+
+            # 2) 再建唯一索引：fund_code + nav_date
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_fund_navdate
+                ON premium_history(fund_code, nav_date)
+            ''')
+            logger.info("  迁移: premium_history 建立 (fund_code, nav_date) 唯一索引")
+        except Exception as e:
+            logger.error(f"  迁移premium_history唯一索引失败: {e}")
+
     # ==================== 操作日志 (v5.0) ====================
 
     def add_log(self, user_id, username, action, target_type=None, target_id=None,
@@ -862,7 +877,7 @@ class DatabaseManager:
             return []
 
     def set_config(self, key, value, updated_by=None):
-        """更新系统配置"""
+        """更新系统配置（key 不存在时自动插入新配置）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -877,6 +892,12 @@ class DatabaseManager:
                     UPDATE system_config SET value = ?, updated_at = ?, updated_by = ?
                     WHERE key = ?
                 ''', (value, now, updated_by, key))
+            # v6.0: UPDATE 命中 0 行说明是新 key，插入之（保留已有 key 的 description）
+            if cursor.rowcount == 0:
+                cursor.execute('''
+                    INSERT INTO system_config (key, value, updated_at, updated_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (key, value, now, updated_by))
             conn.commit()
             conn.close()
             logger.info(f"系统配置已更新: {key} = {value}")
@@ -1090,3 +1111,17 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"获取统计数据失败: {e}")
             return {}
+
+
+# ==================== 进程级单例 (v6.0) ====================
+
+_default_db = None
+
+
+def get_db():
+    """进程级单例，避免每请求重复初始化（init_database + migrations）。
+    DatabaseManager 各方法内部均新建 sqlite 连接，单例本身无线程安全问题。"""
+    global _default_db
+    if _default_db is None:
+        _default_db = DatabaseManager()
+    return _default_db

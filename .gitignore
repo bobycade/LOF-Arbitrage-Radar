@@ -1,42 +1,24 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-*.egg
-.venv/
-venv/
-
-# Environment
+# 敏感配置与密钥（禁止上传）
 .env
 config.env
+.server_secrets
 
-# Database
+# 数据库文件
 *.db
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
 
-# OS
+# 一次性部署/调试脚本（含服务器密码，禁止上传）
+scripts/
+
+# 本地验证脚本与输出
+_verify*
+_smoke*
+qa_test_*.py
+
+# 系统文件
 .DS_Store
 Thumbs.db
-desktop.ini
-
-# Logs
-*.log
-logs/
-
-# Deploy/Debug scripts (contain credentials)
-deploy_*.py
-_deploy_*.py
-debug_*.py
-check_deploy*.py
-fix_*.py
-_test_*.py
-
-# WorkBuddy
-.workbuddy/

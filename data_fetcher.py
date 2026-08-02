@@ -1,19 +1,52 @@
 """
-LOF套利雷达 - 数据采集模块 v5.0
+LOF套利雷达 - 数据采集模块 v6.0
 修复:
 1. 使用 LSJZ API 获取申购状态（SGZT/SHZT字段），不再爬网页
 2. 获取净值日期（FSRQ），区分iNAV和NAV
 3. 获取申购限额信息
+4. [v6.0] NAV/iNAV 采集改线程池并发；requests.get 直连避免 Session 线程安全问题
+5. [v6.0] 折价套利赎回费默认 1.5%（T+1 赎回，持有<7天惩罚性费率）
+6. [v6.0] 法定节假日休市判断；结果附带当日成交额 amount
 """
 import requests
 import json
 import re
+import os
 import time
-import random
 import logging
+import concurrent.futures
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# ============ A股法定节假日（休市日）============
+# 按国务院公告每年更新；可用环境变量 A_SHARE_HOLIDAYS 覆盖（逗号分隔 YYYY-MM-DD）
+_DEFAULT_HOLIDAYS_2026 = [
+    '2026-01-01', '2026-01-02',                                  # 元旦
+    '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',  # 春节
+    '2026-04-06',                                                # 清明节
+    '2026-05-01', '2026-05-04', '2026-05-05',                    # 劳动节
+    '2026-06-19',                                                # 端午节
+    '2026-09-25',                                                # 中秋节
+    '2026-10-01', '2026-10-02', '2026-10-05', '2026-10-06',
+    '2026-10-07', '2026-10-08',                                  # 国庆节
+]
+
+
+def _load_holidays():
+    """从环境变量 A_SHARE_HOLIDAYS 读取节假日，未配置时用内置当年预测值"""
+    env = os.getenv('A_SHARE_HOLIDAYS', '')
+    if env.strip():
+        return {d.strip() for d in env.split(',') if d.strip()}
+    return set(_DEFAULT_HOLIDAYS_2026)
+
+
+HOLIDAYS = _load_holidays()
+
+
+def is_market_closed(now):
+    """判断指定时刻是否休市（周末或法定节假日）"""
+    return now.weekday() >= 5 or now.strftime('%Y-%m-%d') in HOLIDAYS
 
 
 class DataFetcher:
@@ -25,44 +58,9 @@ class DataFetcher:
         })
         self._lof_cache = None
         self._lof_cache_time = None
-        # 频率控制：自适应延迟（遇到429自动降速）
-        self._base_delay_nav = 0.5       # NAV请求基础间隔
-        self._base_delay_inav = 0.5      # iNAV请求基础间隔
-        self._base_delay_batch = 1.0     # 批量价格请求基础间隔
-        self._error_count = 0            # 连续错误计数
-        self._request_count = 0          # 请求计数（每轮重置）
-
-    def _safe_request(self, method, url, **kwargs):
-        """带429检测和自动降速的安全请求方法"""
-        resp = self.session.request(method, url, **kwargs)
-        if resp.status_code == 429:
-            self._error_count += 1
-            # 指数退避：1s, 2s, 4s, 8s, 最大16s
-            backoff = min(2 ** self._error_count, 16)
-            wait = backoff + random.uniform(0.5, 2.0)
-            logger.warning(f"收到429限流，等待{wait:.1f}秒后重试 (连续错误{self._error_count}次)")
-            time.sleep(wait)
-            resp = self.session.request(method, url, **kwargs)
-            if resp.status_code == 429:
-                logger.error(f"重试后仍429，跳过 (URL: {url[:80]})")
-            else:
-                self._error_count = 0  # 重试成功，重置错误计数
-        elif resp.status_code == 403:
-            self._error_count += 1
-            logger.error(f"收到403，IP可能被封禁 (URL: {url[:80]})")
-        else:
-            # 成功请求，逐步恢复基础延迟
-            if self._error_count > 0:
-                self._error_count = max(0, self._error_count - 1)
-        self._request_count += 1
-        return resp
-
-    def _jitter(self, base):
-        """加随机抖动，避免固定频率被识别"""
-        return base + random.uniform(-0.1, 0.2)
 
     def get_all_lof_list(self):
-        """获取全部LOF基金列表（通过基金名称中的(LOF)标识筛选）"""
+        """获取全部LOF基金列表"""
         if self._lof_cache and (datetime.now() - self._lof_cache_time).seconds < 3600:
             return self._lof_cache
         try:
@@ -118,15 +116,15 @@ class DataFetcher:
             secids_str = ','.join(secids)
             url = f'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f3,f4,f5,f6,f12,f14,f15,f16,f17&secids={secids_str}'
             try:
-                resp = self._safe_request('GET', url, timeout=15)
-                if resp.status_code == 429 or resp.status_code == 403:
-                    continue
+                resp = self.session.get(url, timeout=15)
                 data = resp.json()
                 if data.get('data') and data['data'].get('diff'):
                     for item in data['data']['diff']:
                         code = item.get('f12', '')
                         price = item.get('f2')
                         if price and float(price) > 0:
+                            # f2=最新价, f3=涨跌幅%, f4=涨跌额, f5=成交量, f6=成交额
+                            # f16=最高, f17=最低
                             prices[code] = {
                                 'price': float(price),
                                 'change_pct': float(item.get('f3', 0) or 0),
@@ -137,20 +135,21 @@ class DataFetcher:
                             }
             except Exception as e:
                 logger.error(f"批量价格获取失败(batch {i}): {e}")
-            if i + batch_size < len(fund_codes):
-                time.sleep(self._jitter(self._base_delay_batch))
+            time.sleep(0.3)
         return prices
 
     def get_fund_nav_info(self, fund_code):
         """通过 LSJZ API 获取基金净值信息，包含申购状态和净值日期
         返回: dict with nav, nav_date, acc_nav, nav_change_pct, purchase_status, redemption_status, is_inav
+        注意: 使用 requests.get 直连（headers 内联），不用 self.session —— 供线程池并发调用
         """
         try:
             url = f'https://api.fund.eastmoney.com/f10/lsjz?fundCode={fund_code}&pageIndex=1&pageSize=1'
-            headers = {'Referer': 'https://fundf10.eastmoney.com/'}
-            resp = self._safe_request('GET', url, headers=headers, timeout=10)
-            if resp.status_code == 429 or resp.status_code == 403:
-                return None
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://fundf10.eastmoney.com/',
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
             data = resp.json()
             if data.get('Data') and data['Data'].get('LSJZList'):
                 item = data['Data']['LSJZList'][0]
@@ -171,11 +170,13 @@ class DataFetcher:
     def get_inav(self, fund_code):
         """获取盘中实时估值 iNAV（仅交易时间有效）
         返回: dict with inav, inav_date, inav_time, is_inav=True
+        注意: 使用 requests.get 直连（headers 内联），不用 self.session —— 供线程池并发调用
         """
         try:
-            resp = self._safe_request('GET', f'http://fundgz.1234567.com.cn/js/{fund_code}.js', timeout=10)
-            if resp.status_code == 429 or resp.status_code == 403:
-                return None
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            }
+            resp = requests.get(f'http://fundgz.1234567.com.cn/js/{fund_code}.js', headers=headers, timeout=10)
             text = resp.text
             match = re.search(r'"gsz":"([\d.]+)"', text)
             if match:
@@ -212,8 +213,6 @@ class DataFetcher:
 
         results = []
         start_time = time.time()
-        self._request_count = 0  # 每轮重置请求计数
-        logger.info(f"开始采集 {len(fund_list)} 只基金 (NAV间隔={self._base_delay_nav}s, iNAV间隔={self._base_delay_inav}s, 批量间隔={self._base_delay_batch}s)")
 
         # Step 1: 批量获取场内价格
         codes = [f['code'] for f in fund_list]
@@ -222,35 +221,45 @@ class DataFetcher:
         logger.info(f"获取到 {len(prices)} 只价格")
 
         # Step 2: 批量获取NAV信息（包含申购状态和净值日期）
-        # 用 LSJZ API 一次性获取净值+申购状态
-        logger.info("获取净值和申购状态...")
+        # 用 LSJZ API 一次性获取净值+申购状态（v6.0: 线程池并发）
+        logger.info("获取净值和申购状态（并发）...")
         nav_info_map = {}
-        for i, code in enumerate(codes):
-            info = self.get_fund_nav_info(code)
-            if info and info.get('nav', 0) > 0:
-                nav_info_map[code] = info
-            if (i + 1) % 50 == 0:
-                logger.info(f"NAV进度: {i + 1}/{len(codes)}")
-            time.sleep(self._jitter(self._base_delay_nav))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_code = {executor.submit(self.get_fund_nav_info, code): code for code in codes}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_code)):
+                code = future_to_code[future]
+                try:
+                    info = future.result()
+                    if info and info.get('nav', 0) > 0:
+                        nav_info_map[code] = info
+                except Exception as e:
+                    logger.debug(f"NAV获取失败 {code}: {e}")
+                if (i + 1) % 50 == 0:
+                    logger.info(f"NAV进度: {i + 1}/{len(codes)}")
 
         logger.info(f"获取到 {len(nav_info_map)} 只NAV信息")
 
         # Step 3: 获取iNAV（盘中估值，仅在交易时间有效）
         now = datetime.now()
-        is_trading_time = (now.weekday() < 5 and
+        is_trading_time = (not is_market_closed(now) and
                            ((9, 30) <= (now.hour, now.minute) <= (11, 30) or
                             (13, 0) <= (now.hour, now.minute) <= (15, 0)))
-        
+
         inav_map = {}
         if is_trading_time:
-            logger.info("交易时间内，获取iNAV...")
-            for i, code in enumerate(codes):
-                inav = self.get_inav(code)
-                if inav and inav.get('nav', 0) > 0:
-                    inav_map[code] = inav
-                if (i + 1) % 50 == 0:
-                    logger.info(f"iNAV进度: {i + 1}/{len(codes)}")
-                time.sleep(self._jitter(self._base_delay_inav))
+            logger.info("交易时间内，获取iNAV（并发）...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_code = {executor.submit(self.get_inav, code): code for code in codes}
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_code)):
+                    code = future_to_code[future]
+                    try:
+                        inav = future.result()
+                        if inav and inav.get('nav', 0) > 0:
+                            inav_map[code] = inav
+                    except Exception as e:
+                        logger.debug(f"iNAV获取失败 {code}: {e}")
+                    if (i + 1) % 50 == 0:
+                        logger.info(f"iNAV进度: {i + 1}/{len(codes)}")
             logger.info(f"获取到 {len(inav_map)} 只iNAV")
 
         # Step 4: 合并数据
@@ -316,7 +325,8 @@ class DataFetcher:
                 'purchase_limit': purchase_limit,
                 'redemption_status': redemption_status,
                 'purchase_fee': purchase_fee,
-                'redemption_fee': 0.005,  # 默认赎回费0.5%（持有>7天）
+                'redemption_fee': 0.015,  # 折价套利为"场内买入→T+1即赎回"，持有期<7天，适用1.5%惩罚性赎回费
+                'amount': price_info.get('amount', 0),  # 当日成交额，0 表示无成交（可能停牌）
                 'data_date': display_date,
                 'nav_change_pct': round(nav_info.get('nav_change_pct', 0), 2),
                 'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),

@@ -37,8 +37,8 @@ def login_optional(f):
     def decorated_function(*args, **kwargs):
         g.current_user = None
         if 'user_id' in session:
-            from database import DatabaseManager
-            db = DatabaseManager()
+            from database import get_db
+            db = get_db()
             user = db.get_user_by_id(session['user_id'])
             if user:
                 g.current_user = user
@@ -85,8 +85,8 @@ def get_current_user():
     """获取当前登录用户信息（从 DB 实时读取）"""
     if 'user_id' not in session:
         return None
-    from database import DatabaseManager
-    db = DatabaseManager()
+    from database import get_db
+    db = get_db()
     return db.get_user_by_id(session['user_id'])
 
 
@@ -110,8 +110,8 @@ def is_admin():
 def log_action(action, target_type=None, target_id=None, detail=''):
     """便捷操作日志记录（自动获取当前用户信息和IP）"""
     try:
-        from database import DatabaseManager
-        db = DatabaseManager()
+        from database import get_db
+        db = get_db()
         db.add_log(
             user_id=session.get('user_id'),
             username=session.get('username', 'system'),

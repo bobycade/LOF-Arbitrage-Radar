@@ -1,23 +1,28 @@
 """
-LOF套利雷达 - Flask后端应用 v5.0
+LOF套利雷达 - Flask后端应用 v6.0
 修复:
 1-9. (v1-v3 历史修复)
 10. [v4.0] 新增用户认证系统（注册/登录/登出）
 11. [v4.0] 宽松访问模式：未登录可预览，详细数据+导出需登录
 12. [v5.0] 管理后台（用户管理 / 系统配置 / 操作日志）
 13. [v5.0] 操作审计日志
+14. [v6.0] 告警字段补全 + 邮件 from 修复（P0 告警从未发出）
+15. [v6.0] /api/refresh 需内部令牌/admin 身份 + 后台线程异步执行
+16. [v6.0] SECRET_KEY 无公开默认值；session 生命周期不再全局污染
+17. [v6.0] 告警去重状态持久化（重启不重复告警）；DatabaseManager 单例
 """
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, g
 import logging
 import os
+import json
 import re
-import json as _json
+import threading
+import time
 import requests as http_requests
-import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from data_fetcher import DataFetcher
 from arbitrage_calculator import ArbitrageCalculator
-from database import DatabaseManager
+from database import get_db
 from auth import login_required, login_optional, do_login, do_logout, get_current_user, is_logged_in, admin_required, log_action
 from notifier import Notifier
 from dotenv import load_dotenv
@@ -26,23 +31,33 @@ from dotenv import load_dotenv
 load_dotenv('.env')
 load_dotenv('config.env')  # 兼容旧配置
 
-app = Flask(__name__, template_folder='templates', static_folder='static')
-app.config['JSON_AS_ASCII'] = False
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'change-me-in-production')
-# Session 持久时间：默认1天，记住我则7天
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-
-# 配置日志
+# 配置日志（前置，后续模块级初始化需要 logger）
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__, template_folder='templates', static_folder='static')
+app.config['JSON_AS_ASCII'] = False
+# [v6.0] SECRET_KEY 不再提供公开默认值：未配置时生成临时随机密钥（重启后所有 session 失效）
+_secret = os.getenv('SECRET_KEY', '')
+if not _secret:
+    logger.warning('⚠️ 未配置 SECRET_KEY，已生成临时随机密钥（重启后所有 session 失效）。请在 .env 中配置固定强随机值！')
+    _secret = os.urandom(32).hex()
+app.config['SECRET_KEY'] = _secret
+# Session 持久时间：默认1天，记住我则7天
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+# [v6.0] 内部接口令牌：scheduler 等内部调用方访问 /api/refresh 时携带
+INTERNAL_TOKEN = os.getenv('INTERNAL_TOKEN', '')
+if not INTERNAL_TOKEN:
+    logger.warning('⚠️ 未配置 INTERNAL_TOKEN，/api/refresh 仅允许 admin 会话访问。建议在 .env 中配置！')
+
 # 初始化组件
 data_fetcher = DataFetcher()
 calculator = ArbitrageCalculator()
-db = DatabaseManager()
+db = get_db()
 
 # 初始化推送器
 wechat_webhook = os.getenv('WECHAT_WEBHOOK', '')
@@ -53,15 +68,27 @@ if os.getenv('SMTP_USER') and os.getenv('SMTP_PASSWORD'):
         'port': int(os.getenv('SMTP_PORT', '587')),
         'user': os.getenv('SMTP_USER'),
         'password': os.getenv('SMTP_PASSWORD'),
+        'from': os.getenv('SMTP_USER'),
         'to': os.getenv('EMAIL_TO', os.getenv('SMTP_USER'))
     }
 notifier = Notifier(wechat_webhook, mail_config)
 
-# 已推送的基金
-alerted_funds = set()
+# 已推送的基金（v6.0: 持久化到数据库，重启后不重复告警）
+def _load_alerted_funds():
+    """从数据库恢复告警去重状态，解析失败回退空集合"""
+    try:
+        raw = db.get_config('alerted_funds', '')
+        if raw:
+            return set(json.loads(raw))
+    except Exception as e:
+        logger.warning(f"恢复告警去重状态失败，回退空集合: {e}")
+    return set()
+
+
+alerted_funds = _load_alerted_funds()
 
 # 全局数据刷新状态
-refresh_status = {'last_refresh': None, 'refreshing': False, 'count': 0, 'nav_date': '', 'last_done': None}
+refresh_status = {'last_refresh': None, 'refreshing': False, 'count': 0, 'nav_date': ''}
 
 
 @app.route('/')
@@ -86,11 +113,11 @@ def api_status():
             c = conn.cursor()
             c.execute('SELECT COUNT(DISTINCT fund_code) FROM premium_history')
             total_funds = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) AND net_premium_return>=1.5")
+            c.execute("SELECT COUNT(*) FROM premium_history WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code) AND net_premium_return>=1.5")
             premium_count = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) AND net_discount_return>=1.5")
+            c.execute("SELECT COUNT(*) FROM premium_history WHERE id IN (SELECT MAX(id) FROM premium_history GROUP BY fund_code) AND net_discount_return>=1.5")
             discount_count = c.fetchone()[0]
-            c.execute("SELECT nav_date FROM premium_history WHERE timestamp=(SELECT MAX(timestamp) FROM premium_history) LIMIT 1")
+            c.execute("SELECT nav_date FROM premium_history ORDER BY timestamp DESC LIMIT 1")
             row = c.fetchone()
             if row and row[0]:
                 nav_date = row[0]
@@ -153,12 +180,8 @@ def api_login():
 
         do_login(user)
 
-        # session 持久时间
+        # session 持久时间（仅设置当前会话；全局 PERMANENT_SESSION_LIFETIME 配置不可在此修改）
         session.permanent = remember
-        if not remember:
-            app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
-        else:
-            app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
         logger.info(f"用户 {user['username']} 登录成功")
 
@@ -351,47 +374,31 @@ def api_remove_favorite(fund_code):
     return jsonify({'success': True, 'message': '已从自选移除'})
 
 
-@app.route('/api/refresh', methods=['POST'])
-def refresh_data():
-    """手动/定时刷新数据（1分钟冷却限制，防止频繁请求东方财富API）"""
+def _check_refresh_auth():
+    """校验 /api/refresh 调用方身份：内部令牌 或 admin 会话。
+    INTERNAL_TOKEN 未配置时仅允许 admin 会话（启动时已 warning 提醒配置）。"""
+    if INTERNAL_TOKEN and request.headers.get('X-Internal-Token', '') == INTERNAL_TOKEN:
+        return True
+    return session.get('role') == 'admin'
+
+
+def _do_refresh_job():
+    """后台刷新任务主体（内部维护 refresh_status，异常兜底复位 refreshing）"""
     global refresh_status
-
-    if refresh_status.get('refreshing', False):
-        return jsonify({
-            'success': False,
-            'error': '正在刷新中，请稍后重试',
-            'refreshing': True
-        })
-
-    # 冷却限制：距离上次刷新完成不足60秒则拒绝
-    last_done = refresh_status.get('last_done')
-    if last_done:
-        elapsed = (datetime.now() - last_done).total_seconds()
-        if elapsed < 60:
-            return jsonify({
-                'success': False,
-                'error': f'刷新过于频繁，请{int(60 - elapsed)}秒后重试'
-            }), 429
-
     try:
-        refresh_status['refreshing'] = True
         logger.info("开始刷新数据...")
 
         # 获取LOF列表
         lof_list = data_fetcher.get_all_lof_list()
         if not lof_list:
             logger.error("LOF列表为空")
-            refresh_status['refreshing'] = False
-            refresh_status['last_done'] = datetime.now()
-            return jsonify({'success': False, 'error': '获取LOF列表失败，请稍后重试'})
+            return
 
         # 获取实时数据
         fund_data_list = data_fetcher.fetch_all_data(lof_list)
         if not fund_data_list:
-            logger.error("无有效数据")
-            refresh_status['refreshing'] = False
-            refresh_status['last_done'] = datetime.now()
-            return jsonify({'success': False, 'error': '未获取到有效数据，可能非交易时间或接口异常'})
+            logger.error("无有效数据，可能非交易时间或接口异常")
+            return
 
         # 计算套利
         fund_data_list = calculator.calculate_all(fund_data_list)
@@ -408,26 +415,32 @@ def refresh_data():
         refresh_status['last_refresh'] = now
         refresh_status['count'] = len(fund_data_list)
         refresh_status['nav_date'] = nav_date
-        refresh_status['refreshing'] = False
-        refresh_status['last_done'] = datetime.now()
 
         logger.info(f"数据刷新完成，共 {len(fund_data_list)} 只基金，净值日期 {nav_date}")
 
-        return jsonify({
-            'success': True,
-            'count': len(fund_data_list),
-            'nav_date': nav_date,
-            'time': now
-        })
-
     except Exception as e:
         logger.error(f"刷新数据失败: {e}")
+    finally:
         refresh_status['refreshing'] = False
-        refresh_status['last_done'] = datetime.now()
+
+
+@app.route('/api/refresh', methods=['POST'])
+def refresh_data():
+    """手动/定时刷新数据（v6.0: 需内部令牌或 admin 身份，后台线程异步执行）"""
+    if not _check_refresh_auth():
+        logger.warning(f"/api/refresh 未授权访问被拒绝 (ip={request.remote_addr})")
+        return jsonify({'success': False, 'error': '无权限访问'}), 403
+
+    if refresh_status.get('refreshing', False):
         return jsonify({
             'success': False,
-            'error': str(e)
-        }), 500
+            'error': '正在刷新中，请稍后重试',
+            'refreshing': True
+        })
+
+    refresh_status['refreshing'] = True
+    threading.Thread(target=_do_refresh_job, daemon=True).start()
+    return jsonify({'success': True, 'message': '刷新任务已启动', 'refreshing': True})
 
 
 @app.route('/api/premium')
@@ -634,10 +647,12 @@ def check_alerts(fund_data_list):
                 fund_key = f"{fund['code']}_premium"
                 if fund_key not in alerted_funds:
                     alert_premium.append({
-                        'code': fund['code'],
-                        'name': fund['name'],
+                        'code': fund['code'], 'name': fund['name'], 'type': fund.get('type', ''),
+                        'market_price': fund.get('market_price', 0), 'inav': fund.get('inav', 0),
+                        'premium_rate': fund.get('premium_rate', 0), 'discount_rate': fund.get('discount_rate', 0),
                         'net_return': prem.get('net_return', 0),
                         'purchase_status': fund.get('purchase_status', '未知'),
+                        'suggestion': prem.get('suggestion', ''),
                     })
                     alerted_funds.add(fund_key)
 
@@ -646,9 +661,12 @@ def check_alerts(fund_data_list):
                 fund_key = f"{fund['code']}_discount"
                 if fund_key not in alerted_funds:
                     alert_discount.append({
-                        'code': fund['code'],
-                        'name': fund['name'],
+                        'code': fund['code'], 'name': fund['name'], 'type': fund.get('type', ''),
+                        'market_price': fund.get('market_price', 0), 'inav': fund.get('inav', 0),
+                        'premium_rate': fund.get('premium_rate', 0), 'discount_rate': fund.get('discount_rate', 0),
                         'net_return': disc.get('net_return', 0),
+                        'purchase_status': fund.get('purchase_status', '未知'),
+                        'suggestion': disc.get('suggestion', ''),
                     })
                     alerted_funds.add(fund_key)
         except Exception as e:
@@ -679,6 +697,12 @@ def check_alerts(fund_data_list):
         if isinstance(disc, dict) and disc.get('net_return', 0) >= threshold:
             current_codes.add(f"{fund['code']}_discount")
     alerted_funds = alerted_funds.intersection(current_codes)
+
+    # v6.0: 持久化告警去重状态，重启后不重复告警
+    try:
+        db.set_config('alerted_funds', json.dumps(list(alerted_funds)))
+    except Exception as e:
+        logger.error(f"持久化告警去重状态失败: {e}")
 
 
 # ==================== 基金详情代理接口 (v5.1) ====================
@@ -729,8 +753,6 @@ def api_fund_detail():
     except Exception as e:
         logger.warning(f'基金详情-基本信息失败 {code}: {e}')
 
-    _time.sleep(0.3)  # 请求间隔，避免触发东方财富频率限制
-
     # 2) 近期业绩
     try:
         url2 = f'{api_base}/FundMNPeriodIncrease?{params.format(code)}'
@@ -747,8 +769,6 @@ def api_fund_detail():
         result['performance'] = perf
     except Exception as e:
         logger.warning(f'基金详情-业绩数据失败 {code}: {e}')
-
-    _time.sleep(0.3)  # 请求间隔，避免触发东方财富频率限制
 
     # 3) 基金经理
     try:
@@ -767,74 +787,145 @@ def api_fund_detail():
     return jsonify({'success': True, 'data': result})
 
 
-@app.route('/api/fund/nav_history')
-def api_fund_nav_history():
-    """代理获取历史净值 — 使用 pingzhongdata 接口（f10/lsjz 已被封禁）"""
-    code = request.args.get('code', '').strip()
-    if not code:
-        return jsonify({'success': False, 'error': '缺少基金代码'}), 400
+# [v6.1] 历史净值全量缓存：避免用户反复打开基金详情打爆东财接口
+_nav_history_cache = {}  # {code: (fetched_at_epoch, response_dict)}
+_nav_history_cache_lock = threading.Lock()
+_NAV_HISTORY_CACHE_TTL = 300  # 5 分钟
 
+
+def _fetch_nav_history_pingzhongdata(code: str):
+    """从天天基金 pingzhongdata 接口拉取全量历史净值。
+
+    解析页面 JS 中的两个变量：
+      - Data_netWorthTrend: [{"x": 毫秒时间戳, "y": 单位净值, "equityReturn": 日涨幅%, ...}, ...]
+      - Data_ACWorthTrend:  [[毫秒时间戳, 累计净值], ...]（可能不存在，容错处理）
+    返回与东财 lsjz 接口字段兼容的列表（前端 _fdBuildNavRow 依赖），按日期倒序（最新在前）；
+    请求失败或解析不到数据时返回 None，由调用方回退。
+    """
+    url = f'http://fund.eastmoney.com/pingzhongdata/{code}.js'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': f'http://fund.eastmoney.com/{code}.html',
+    }
+    r = http_requests.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    text = r.text
+
+    # 单位净值走势（必需）
+    m = re.search(r'var\s+Data_netWorthTrend\s*=\s*(\[.*?\])\s*;', text, re.S)
+    if not m:
+        return None
+    net_worth_trend = json.loads(m.group(1))
+    if not isinstance(net_worth_trend, list) or not net_worth_trend:
+        return None
+
+    # 累计净值走势（可选）：{毫秒时间戳: 累计净值}
+    ac_map = {}
+    m2 = re.search(r'var\s+Data_ACWorthTrend\s*=\s*(\[.*?\])\s*;', text, re.S)
+    if m2:
+        try:
+            ac_trend = json.loads(m2.group(1))
+            for pair in ac_trend:
+                if isinstance(pair, list) and len(pair) >= 2:
+                    ac_map[pair[0]] = pair[1]
+        except Exception as e:
+            logger.warning(f'累计净值走势解析失败 {code}: {e}')
+
+    rows = []
+    for item in net_worth_trend:
+        if not isinstance(item, dict):
+            continue
+        ts = item.get('x')
+        nav = item.get('y')
+        if ts is None or nav is None:
+            continue
+        # 东财时间戳为北京时间零点：先按 UTC 换算再 +8h，避免依赖服务器本地时区
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc) + timedelta(hours=8)
+        fsrq = dt.strftime('%Y-%m-%d')
+        dwjz = f'{nav:.4f}' if isinstance(nav, (int, float)) else str(nav)
+        ac_nav = ac_map.get(ts)
+        # 无累计净值数据时回退等于单位净值
+        ljjz = f'{ac_nav:.4f}' if isinstance(ac_nav, (int, float)) else dwjz
+        equity_return = item.get('equityReturn')
+        jzzzl = f'{equity_return:.2f}' if isinstance(equity_return, (int, float)) else ''
+        rows.append({'FSRQ': fsrq, 'DWJZ': dwjz, 'LJJZ': ljjz, 'JZZZL': jzzzl})
+
+    if not rows:
+        return None
+    # 前端约定"后端已按最新在前排列"
+    rows.sort(key=lambda row: row['FSRQ'], reverse=True)
+    return rows
+
+
+def _nav_history_lsjz(code: str, page: int, page_size: int):
+    """东财 lsjz 分页接口（旧实现，保留为分页兼容分支 / pingzhongdata 失败时的 fallback）"""
     try:
-        url = f'https://fund.eastmoney.com/pingzhongdata/{code}.js'
+        url = f'https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize={page_size}'
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://fund.eastmoney.com/',
         }
-        r = http_requests.get(url, headers=headers, timeout=30)
+        r = http_requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
-        text = r.text
-
-        if 'Data_netWorthTrend' not in text:
-            logger.warning(f'基金历史净值数据为空 {code}')
-            return jsonify({'success': True, 'data': {'LSJZList': []}, 'totalCount': 0})
-
-        # 解析 JS 变量 Data_netWorthTrend（格式：[{x: 时间戳ms, y: 单位净值, equityReturn: 日涨跌%}, ...]）
-        match = re.search(r'Data_netWorthTrend\s*=\s*(\[[\s\S]*?\]);', text)
-        if not match:
-            logger.warning(f'基金历史净值解析失败 {code}: 未找到 Data_netWorthTrend')
-            return jsonify({'success': False, 'error': '无法解析净值数据'}), 502
-
-        raw = _json.loads(match.group(1))
-        if not raw or not isinstance(raw, list) or len(raw) == 0:
-            return jsonify({'success': True, 'data': {'LSJZList': []}, 'totalCount': 0})
-
-        # 转换为兼容前端的 LSJZList 格式（FSRQ / DWJZ / LJJZ / JZZZL）
-        lsjz_list = []
-        for item in raw:
-            ts = item.get('x', 0)
-            nav = item.get('y', 0)
-            er = item.get('equityReturn', 0)
-            try:
-                date_str = datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d')
-            except (OSError, ValueError):
-                continue
-            lsjz_list.append({
-                'FSRQ': date_str,
-                'DWJZ': str(nav),
-                'LJJZ': str(nav),       # pingzhongdata 不提供累计净值
-                'JZZZL': str(er),       # 日涨跌幅（%）
-            })
-
-        # 按最新在前排列（与原 f10/lsjz 行为一致）
-        lsjz_list.reverse()
-
+        data = r.json()
         return jsonify({
             'success': True,
-            'data': {'LSJZList': lsjz_list},
-            'totalCount': len(lsjz_list),
+            'data': data.get('Data', {}),
+            'totalCount': data.get('TotalCount', 0),
         })
-    except http_requests.exceptions.Timeout:
-        logger.warning(f'基金历史净值请求超时 {code}')
-        return jsonify({'success': False, 'error': '请求数据源超时，请稍后重试'}), 504
-    except http_requests.exceptions.HTTPError as e:
-        logger.error(f'基金历史净值 HTTP 错误 {code}: {e}')
-        return jsonify({'success': False, 'error': f'数据源服务异常 (HTTP {getattr(r, "status_code", "?")})'}), 502
     except Exception as e:
-        logger.error(f'基金历史净值获取失败 {code}: {e}')
+        logger.warning(f'基金历史净值获取失败 {code}: {e}')
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/fund/nav_history')
+def api_fund_nav_history():
+    """代理获取历史净值（解决跨域问题）。
+
+    默认走 pingzhongdata 一次返回全量数据（带 5 分钟内存缓存）；
+    显式传 page/pageSize 参数时走旧 lsjz 分页分支（兼容旧前端）；
+    pingzhongdata 失败时自动回退 lsjz，保证接口可用性。
+    """
+    code = request.args.get('code', '').strip()
+    if not code:
+        return jsonify({'success': False, 'error': '缺少基金代码'}), 400
+
+    # 分页兼容分支：旧前端显式携带分页参数时使用旧逻辑
+    page_param = request.args.get('page')
+    page_size_param = request.args.get('pageSize')
+    if page_param is not None or page_size_param is not None:
+        # 非法分页参数（如 page=abc）回退默认值，避免 int() 抛 ValueError 变 500
+        try:
+            page = int(page_param or 1)
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = int(page_size_param or 120)
+        except (TypeError, ValueError):
+            page_size = 120
+        return _nav_history_lsjz(code, page, page_size)
+
+    # 命中 5 分钟缓存直接返回
+    now = time.time()
+    with _nav_history_cache_lock:
+        cached = _nav_history_cache.get(code)
+    if cached and now - cached[0] < _NAV_HISTORY_CACHE_TTL:
+        return jsonify(cached[1])
+
+    # 主路径：pingzhongdata 全量
+    try:
+        rows = _fetch_nav_history_pingzhongdata(code)
+        if rows:
+            resp = {'success': True, 'data': {'LSJZList': rows}, 'totalCount': len(rows)}
+            with _nav_history_cache_lock:
+                _nav_history_cache[code] = (now, resp)
+            return jsonify(resp)
+        logger.warning(f'pingzhongdata 无有效净值数据，回退 lsjz: {code}')
     except Exception as e:
-        logger.error(f'基金历史净值获取失败 {code}: {e}')
-        return jsonify({'success': False, 'error': f'获取失败: {str(e)}'}), 500
+        logger.warning(f'pingzhongdata 历史净值失败 {code}，回退 lsjz: {e}')
+
+    # fallback：lsjz 分页（首页 120 条）
+    return _nav_history_lsjz(code, 1, 120)
 
 
 # ==================== 管理后台路由 (v5.0) ====================

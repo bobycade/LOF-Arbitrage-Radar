@@ -1,10 +1,12 @@
 """
-LOF套利雷达 - 套利计算模块 v2.0
+LOF套利雷达 - 套利计算模块 v2.1
 修复:
 1. 折价套利明确标注"赎回价未知"的风险
 2. 净收益改名为更清晰的"扣除费用后预估收益"
 3. 费率说明更详细
 4. QDII基金额外风险提示
+5. [v2.1] QDII 溢价套利等待期 T+3；QDII 折价追加资金占用提示；QDII 无实时估值提示
+6. [v2.1] 当日无成交基金禁止套利并追加风险提示
 """
 import logging
 
@@ -39,7 +41,11 @@ class ArbitrageCalculator:
 
             # 扣费净收益 = 溢价率 - 申购费率 - 卖出佣金
             net_return = premium_rate - (purchase_fee * 100) - (self.TRADING_COMMISSION * 100)
-            waiting_days = 2  # 申购确认约T+2
+            # QDII 申购 T+2 确认、T+3 可卖；非 QDII 为 T+2
+            waiting_days = 3 if is_qdii else 2
+
+            # [v2.1] 当日无成交：可能停牌或流动性枯竭，禁止套利（net_return 照常计算展示）
+            no_volume = fund_data.get('amount', 1) == 0
 
             # 暂停申购时用默认费率（通常1.5%）估算
             if is_suspended:
@@ -72,9 +78,18 @@ class ArbitrageCalculator:
             # QDII额外提示
             if is_qdii:
                 risk += '；QDII基金净值受隔夜外盘影响大'
+                # QDII 无盘中实时估值，溢价率只能基于 T-1 净值估算
+                if not fund_data.get('is_inav'):
+                    risk += '；盘中溢价率基于T-1净值估算（QDII无实时估值）'
+
+            # [v2.1] 当日无成交：禁止套利，风险前置提示
+            can_arbitrage = net_return >= 1.5
+            if no_volume:
+                can_arbitrage = False
+                risk = '⚠️ 当日无成交，可能停牌或流动性枯竭；' + risk
 
             return {
-                'can_arbitrage': net_return >= 1.5,
+                'can_arbitrage': can_arbitrage,
                 'net_return': round(net_return, 2),
                 'waiting_days': waiting_days,
                 'suggestion': suggestion,
@@ -112,6 +127,9 @@ class ArbitrageCalculator:
             net_return = discount_rate - (self.TRADING_COMMISSION * 100) - (redemption_fee * 100)
             waiting_days = 3  # 场内买入T+1份额到账，赎回T+1确认
 
+            # [v2.1] 当日无成交：可能停牌或流动性枯竭，禁止套利（net_return 照常计算展示）
+            no_volume = fund_data.get('amount', 1) == 0
+
             # 生成操作建议（强调风险）
             if is_redemption_suspended:
                 suggestion = f'当前{redemption_status}，理论折价{discount_rate:.2f}%，扣费后约{net_return:.2f}%'
@@ -129,9 +147,16 @@ class ArbitrageCalculator:
             # QDII额外提示
             if is_qdii:
                 risk += '；QDII基金隔夜外盘波动可能导致赎回价偏离'
+                risk += '；QDII赎回资金T+7以上到账，资金占用成本高'
+
+            # [v2.1] 当日无成交：禁止套利，风险前置提示
+            can_arbitrage = net_return >= 1.5
+            if no_volume:
+                can_arbitrage = False
+                risk = '⚠️ 当日无成交，可能停牌或流动性枯竭；' + risk
 
             return {
-                'can_arbitrage': net_return >= 1.5,
+                'can_arbitrage': can_arbitrage,
                 'net_return': round(net_return, 2),
                 'waiting_days': waiting_days,
                 'suggestion': suggestion,
@@ -180,8 +205,9 @@ if __name__ == '__main__':
         'purchase_status': '开放申购',
         'purchase_limit': 999999999,
         'purchase_fee': 0.0015,
-        'redemption_fee': 0.005,
+        'redemption_fee': 0.015,  # v2.1: 与采集端默认一致（T+1赎回，持有<7天）
         'redemption_status': '开放赎回',
+        'amount': 12345678,
     }
 
     calc = ArbitrageCalculator()
@@ -190,3 +216,15 @@ if __name__ == '__main__':
 
     print("溢价套利:", premium)
     print("折价套利:", discount)
+
+    # v2.1 新增：当日无成交（停牌/流动性枯竭）用例 —— can_arbitrage 必须为 False 且 risk 含新提示
+    test_halt = dict(test_fund, amount=0, premium_rate=-3.0, discount_rate=3.0,
+                     market_price=1.164)
+    print("无成交-溢价套利:", calc.calculate_premium_arbitrage(test_halt))
+    print("无成交-折价套利:", calc.calculate_discount_arbitrage(test_halt))
+
+    # v2.1 新增：QDII 用例 —— 等待期 T+3，risk 含资金占用与无实时估值提示
+    test_qdii = dict(test_fund, code='160416', name='华安石油QDII', type='QDII',
+                     is_inav=False)
+    print("QDII-溢价套利:", calc.calculate_premium_arbitrage(test_qdii))
+    print("QDII-折价套利:", calc.calculate_discount_arbitrage(test_qdii))
