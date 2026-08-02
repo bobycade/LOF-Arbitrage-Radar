@@ -119,10 +119,14 @@ Key variables in `.env`:
 
 | Variable | Description |
 |----------|-------------|
-| `SECRET_KEY` | Flask session secret (generate a random string!) |
-| `WECHAT_WEBHOOK` | WeChat Work bot webhook URL |
-| `SMTP_USER` / `SMTP_PASSWORD` | Email notification credentials |
-| `ALERT_THRESHOLD` | Alert push threshold (%) |
+| `SECRET_KEY` | Flask session secret (**required**, generate via `python -c "import secrets; print(secrets.token_hex(32))"`) |
+| `INTERNAL_TOKEN` | Scheduler → `/api/refresh` auth token (**required**, otherwise auto-refresh gets 403) |
+| `WECHAT_WEBHOOK` | WeChat Work bot webhook URL (optional) |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP server config (default smtp.qq.com:587) |
+| `SMTP_USER` / `SMTP_PASSWORD` | Email notification credentials (auth code, not password) |
+| `EMAIL_TO` | Alert email recipient (defaults to SMTP_USER) |
+| `ARBITRAGE_THRESHOLD_ALERT` | Alert push threshold, net return % (default 3.0) |
+| `A_SHARE_HOLIDAYS` | Comma-separated holiday dates to override built-in calendar (update yearly) |
 
 ## Verify Deployment
 
@@ -271,10 +275,14 @@ sudo supervisorctl start lof_arbitrage_app lof_arbitrage_scheduler
 
 | 变量 | 说明 |
 |------|------|
-| `SECRET_KEY` | Flask 会话密钥（务必设置为随机字符串！） |
-| `WECHAT_WEBHOOK` | 企业微信群机器人 Webhook 地址 |
-| `SMTP_USER` / `SMTP_PASSWORD` | 邮件通知的账号和授权码 |
-| `ALERT_THRESHOLD` | 告警推送阈值（%） |
+| `SECRET_KEY` | Flask 会话密钥（**必须配置**，生成：`python -c "import secrets; print(secrets.token_hex(32))"`） |
+| `INTERNAL_TOKEN` | 调度器调用 /api/refresh 的认证令牌（**必须配置**，否则定时刷新返回 403） |
+| `WECHAT_WEBHOOK` | 企业微信群机器人 Webhook 地址（可选） |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP 服务器配置（默认 smtp.qq.com:587） |
+| `SMTP_USER` / `SMTP_PASSWORD` | 邮件通知的账号和授权码（非登录密码） |
+| `EMAIL_TO` | 告警收件邮箱（默认同 SMTP_USER） |
+| `ARBITRAGE_THRESHOLD_ALERT` | 告警推送阈值：扣费后净收益 %（默认 3.0） |
+| `A_SHARE_HOLIDAYS` | 法定节假日（逗号分隔），覆盖内置日历，需每年更新 |
 
 ## 验证部署
 
