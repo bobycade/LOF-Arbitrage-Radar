@@ -327,25 +327,27 @@ def api_get_favorites():
 
     # 合并最新基金数据
     all_data = db.get_all_funds()
-    fund_map = {f['fund_code']: f for f in all_data}
+    # 注意 get_all_funds 返回的键是别名 code/name/type（非 fund_code）
+    fund_map = {f['code']: f for f in all_data}
 
     enriched = []
     for fav in favorites:
         code = fav['fund_code']
+        base = dict(fav)  # 转为普通 dict，避免 Row 序列化问题
         if code in fund_map:
             fd = fund_map[code]
             enriched.append({
-                **fav,
+                **base,
                 'nav_date': fd.get('nav_date', ''),
                 'market_price': fd.get('market_price'),
                 'nav': fd.get('nav'),
                 'premium_rate': fd.get('premium_rate') or fd.get('discount_rate') or '-',
-                'profit_after_fee': fd.get('net_premium_return') or fd.get('net_discount_return') or 0,
+                'profit_after_fee': fd.get('profit_after_fee') or fd.get('discount_profit') or 0,
                 'purchase_status': fd.get('purchase_status', ''),
-                'redeem_status': fd.get('redemption_status', '') or fd.get('redeem_status', ''),
+                'redeem_status': fd.get('redeem_status', '') or fd.get('redemption_status', ''),
             })
         else:
-            enriched.append(fav)
+            enriched.append(base)
 
     return jsonify({'success': True, 'data': enriched})
 

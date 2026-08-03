@@ -50,6 +50,7 @@ async function checkAuthStatus() {
             currentUser = data.user;
             isLoggedInState = true;
             updateUserUI(true);
+            await initUserFavorites();   // 登录后：迁移本地存量自选 → 后端，并从后端拉取
         } else {
             currentUser = null;
             isLoggedInState = false;
@@ -84,9 +85,9 @@ function updateUserUI(loggedIn) {
         userArea.className = 'user-area';
     }
 
-    // 显示/隐藏自选标签（需要登录）
+    // 显示/隐藏自选标签：登录用户始终可见；游客在有本地自选时也可见（本地兜底）
     const favTab = document.getElementById('favTab');
-    if (favTab) favTab.style.display = loggedIn ? 'inline-block' : 'none';
+    if (favTab) favTab.style.display = (loggedIn || favorites.length > 0) ? 'inline-block' : 'none';
 }
 
 function showLogin() {
@@ -570,17 +571,105 @@ function showRiskWarning(code, name) {
 }
 
 // ========== 自选基金 ==========
+// 【v6.3】后端存储 + 本地兜底：
+//   登录用户 -> 自选以后端 user_favorites 为准，增删同步到服务器，localStorage 仅作兜底备份
+//   游客     -> 仅用 localStorage，标签在有数据时显示
+function isFavLoggedIn() { return isLoggedInState === true; }
+
+function updateFavCount() {
+    const c = document.getElementById('favCount');
+    if (c) c.textContent = favorites.length;
+    const tab = document.getElementById('favTab');
+    if (tab) tab.style.display = (favorites.length > 0) ? 'inline-block' : 'none';
+}
+
+// 后端返回字段为 fund_code/fund_name/fund_type，归一化为前端使用的 code/name/type
+function normalizeFav(f) {
+    return {
+        code: f.fund_code,
+        name: f.fund_name || f.name || '',
+        type: f.fund_type || f.type || '',
+        nav_date: f.nav_date || '',
+        market_price: f.market_price,
+        nav: f.nav,
+        rate: (f.premium_rate !== undefined && f.premium_rate !== '-') ? f.premium_rate : (f.rate || '-'),
+        premium_rate: f.premium_rate,
+        discount_rate: f.discount_rate,
+        profit_after_fee: f.profit_after_fee,
+        purchase_status: f.purchase_status || '',
+        redeem_status: f.redeem_status || ''
+    };
+}
+
+// 从后端拉取最新自选，覆盖本地（已登录用户的权威来源）；失败则保留本地
+async function refreshFavFromServer() {
+    try {
+        const res = await fetch('/api/favorites');
+        const data = await res.json();
+        if (data.success && Array.isArray(data.data)) {
+            favorites = data.data.map(normalizeFav);
+            saveFavorites();
+            if (currentTab === 'favorites') renderFavorites();
+            updateFavCount();
+        }
+    } catch (e) {
+        console.error('从服务器加载自选失败，保留本地数据:', e);
+    }
+}
+
+// 将本地缓存的自选迁移到后端（仅在登录后调用；INSERT OR IGNORE 保证幂等）
+async function migrateLocalFavsToServer() {
+    const local = JSON.parse(localStorage.getItem('lofFavorites') || '[]');
+    if (!local.length) { await refreshFavFromServer(); return; }
+    for (const f of local) {
+        try {
+            await fetch('/api/favorites', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fund_code: f.code, fund_name: f.name, fund_type: f.type })
+            });
+        } catch (e) { console.error('迁移自选失败:', e); }
+    }
+    await refreshFavFromServer();   // 迁移完成后拉取权威列表
+}
+
+// 登录后初始化：先迁移本地存量，再从后端拉取
+async function initUserFavorites() {
+    await migrateLocalFavsToServer();
+}
+
+async function pushFavToServer(code, name, type) {
+    try {
+        await fetch('/api/favorites', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fund_code: code, fund_name: name, fund_type: type })
+        });
+    } catch (e) { console.error('添加自选到服务器失败:', e); }
+}
+
+async function removeFavFromServer(code) {
+    try {
+        await fetch('/api/favorites/' + code, { method: 'DELETE' });
+    } catch (e) { console.error('从服务器移除自选失败:', e); }
+}
+
 function toggleFavorite(code, name, type, nav_date, market_price, nav, rate, profit_after_fee, purchase_status, redeem_status, btn) {
     const idx = favorites.findIndex(f => f.code === code);
+    let adding;
     if (idx > -1) {
         favorites.splice(idx, 1);
-        btn.innerHTML = '☆'; btn.title = '添加关注';
+        adding = false;
+        if (btn) { btn.innerHTML = '☆'; btn.title = '添加关注'; }
     } else {
         favorites.push({ code, name, type, nav_date, market_price, nav, rate, profit_after_fee, purchase_status, redeem_status });
-        btn.innerHTML = '⭐'; btn.title = '取消关注';
+        adding = true;
+        if (btn) { btn.innerHTML = '⭐'; btn.title = '取消关注'; }
     }
     saveFavorites();
     if (currentTab === 'favorites') renderFavorites();
+    updateFavCount();
+    if (isFavLoggedIn()) { adding ? pushFavToServer(code, name, type) : removeFavFromServer(code); }
 }
 
 function saveFavorites() {
@@ -614,7 +703,8 @@ function renderFavorites() {
 
 function removeFavorite(code, name) {
     favorites = favorites.filter(f => f.code !== code);
-    saveFavorites(); renderFavorites();
+    saveFavorites(); renderFavorites(); updateFavCount();
+    if (isFavLoggedIn()) removeFavFromServer(code);
 }
 
 // ========== 套利收益计算器（增强版）==========
@@ -1405,6 +1495,7 @@ function toggleFavFromDetail() {
     const d = fdCurrentFund;
     const code = d.code;
     const idx = favorites.findIndex(f => f.code === code);
+    let adding = idx === -1;
     if (idx > -1) {
         favorites.splice(idx, 1);
     } else {
@@ -1417,6 +1508,7 @@ function toggleFavFromDetail() {
         });
     }
     saveFavorites();
+    updateFavCount();
     // 同步更新抽屉按钮
     const isFav = favorites.some(f => f.code === code);
     const favBtn = document.getElementById('fdFavBtn');
@@ -1431,6 +1523,7 @@ function toggleFavFromDetail() {
         }
     });
     if (currentTab === 'favorites') renderFavorites();
+    if (isFavLoggedIn()) { adding ? pushFavToServer(code, d.name, d.type) : removeFavFromServer(code); }
 }
 
 /** 格式化基金规模 */

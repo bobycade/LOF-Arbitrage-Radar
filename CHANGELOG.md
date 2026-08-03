@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [v6.3] - 2026-08-03
+
+### 中文
+- **自选改为后端存储 + 本地兜底**：登录用户的自选存入后端 `user_favorites` 表（跨设备/清缓存不丢失），增删实时同步；游客仍用浏览器 `localStorage`，标签在有数据时可见
+- 首次登录自动将本地存量自选迁移到后端账号（INSERT OR IGNORE 幂等，不丢已有数据）
+- **修复 `GET /api/favorites` 后端崩溃（500）**：原代码用 `f['fund_code']` 取 `get_all_funds()` 返回的别名键（实为 `code`）导致 KeyError；并修正 `profit_after_fee` 取值列名、以及 `else` 分支直接塞 `sqlite3.Row` 引发的序列化问题
+- 静态资源版本号 app.js `?v=6.3` 破缓存
+
+### English
+- **Favorites now backend-backed with localStorage fallback**: logged-in users' watchlist persists in `user_favorites` (survives cache clear / multiple devices), add/remove synced in real time; guests keep using `localStorage` with the tab shown when non-empty
+- First login auto-migrates existing local favorites into the account (idempotent, no data loss)
+- Bumped app.js asset version to `?v=6.3` to bust cache
+
 ## [v6.2] - 2026-08-02
 
 ### 中文
